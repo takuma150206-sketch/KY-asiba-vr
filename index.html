@@ -1,0 +1,1603 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KY（危険予知）体験VR（試作）</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#000;
+    font-family:"Noto Sans JP","Hiragino Sans","Yu Gothic","Meiryo",sans-serif;}
+  canvas{display:block;touch-action:none;}
+  #overlay{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+    background:rgba(0,0,0,.55);z-index:10;padding:16px;box-sizing:border-box;}
+  .card{background:#fff;max-width:680px;width:100%;padding:22px 28px;border-radius:14px;line-height:1.7;
+    box-shadow:0 10px 40px rgba(0,0,0,.4);max-height:100%;overflow:auto;box-sizing:border-box;}
+  .card h1{font-size:22px;margin:0 0 8px;color:#b45309;}
+  .card ul{padding-left:1.2em;margin:8px 0;}
+  .warn{background:#fef3c7;border-left:5px solid #f59e0b;padding:8px 12px;font-size:14px;}
+  .btns{display:flex;gap:12px;margin-top:14px;flex-wrap:wrap;}
+  .btns button{flex:1;min-width:180px;font-size:18px;font-weight:bold;padding:14px;border:0;border-radius:10px;cursor:pointer;}
+  #vrBtn{background:#f59e0b;color:#111;}
+  #vrBtn:disabled{background:#d1d5db;color:#6b7280;cursor:not-allowed;}
+  #pcBtn{background:#1f2937;color:#fff;}
+  #status{font-size:13px;color:#b91c1c;margin-top:8px;min-height:1em;}
+  #pcHelp{position:fixed;left:10px;bottom:10px;color:#fff;background:rgba(0,0,0,.55);padding:6px 12px;
+    font-size:13px;border-radius:6px;display:none;z-index:5;}
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="overlay"><div class="card">
+  <h1>KY（危険予知）体験VR〈試作〉</h1>
+  <p>建設現場の危険を、VRの中で<b>指差して見つける</b>体験です。開始後の画面で体験するシナリオを選びます。</p>
+  <ul>
+    <li><b>Meta Quest</b>：「VRで開始」→ トリガー＝指差し／左スティック＝移動／右スティック＝向き変更</li>
+    <li><b>PC</b>：「PCで開始」→ ドラッグ＝見回し／クリック＝指差し／WASD・矢印キー＝移動</li>
+  </ul>
+  <div class="warn">⚠ 高所・落下・感電などの疑似体験（短い暗転）があります。周囲の安全を確保し、できれば椅子に座って体験してください。気分が悪くなったらすぐに中止してください。</div>
+  <p style="margin:10px 0 0"><label><input type="checkbox" id="fxOpt" checked> 疑似体験の演出あり（オフにすると暗転のみ）</label></p>
+  <div class="btns">
+    <button id="vrBtn" disabled>VRで開始</button>
+    <button id="pcBtn">PCで開始（マウス）</button>
+  </div>
+  <div id="status">VR対応を確認中…</div>
+</div></div>
+<div id="pcHelp">ドラッグ：見回す ／ クリック：指差し ／ WASD・矢印：移動</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
+
+/* =====================================================================
+   共通エンジン
+   ・シナリオを追加するときは、下の「シナリオ定義」に1つ追加し、
+     SCENARIOS 配列に登録するだけでメニューに表示されます。
+   ===================================================================== */
+const FONT = '"Noto Sans JP","Noto Sans CJK JP","Hiragino Sans","Yu Gothic","Meiryo",sans-serif';
+let effectOn = true;
+// URL指定：?s=kanden でそのシナリオから開始、&solo=1 でシナリオ選択メニューを出さない（項目ごとの専用URL用）
+const URLP = new URLSearchParams(location.search);
+const SOLO = URLP.get('solo')==='1';
+const PENALTY = 3;   // お手つき（危険でない所を指した）ときに減る秒数
+
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.xr.enabled = true;
+renderer.xr.setReferenceSpaceType('local-floor');
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const rig = new THREE.Group(); scene.add(rig);
+const camera = new THREE.PerspectiveCamera(70, innerWidth/innerHeight, 0.05, 800);
+camera.position.set(0,1.6,0);
+rig.add(camera);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x8a7a60, 1.2));
+const sun = new THREE.DirectionalLight(0xffffff, 1.8); sun.position.set(-30,60,-40); scene.add(sun);
+
+// ---------- ユーティリティ ----------
+function canvasTex(w,h,draw,repeat){
+  const c=document.createElement('canvas'); c.width=w; c.height=h;
+  draw(c.getContext('2d'),w,h);
+  const t=new THREE.CanvasTexture(c); t.colorSpace=THREE.SRGBColorSpace; t.anisotropy=8;
+  if(repeat){ t.wrapS=t.wrapT=THREE.RepeatWrapping; t.repeat.set(repeat[0],repeat[1]); }
+  return t;
+}
+const M = (c,extra={}) => new THREE.MeshLambertMaterial({color:c,...extra});
+const V = a => a.isVector3 ? a.clone() : new THREE.Vector3(a[0],a[1],a[2]);
+const UP = new THREE.Vector3(0,1,0);
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+function bar(a,b,t,mat,parent){
+  const A=V(a),B=V(b),d=B.clone().sub(A),len=d.length();
+  const m=new THREE.Mesh(new THREE.BoxGeometry(t,len,t),mat);
+  m.position.copy(A).add(B).multiplyScalar(0.5);
+  m.quaternion.setFromUnitVectors(UP,d.normalize());
+  parent.add(m); return m;
+}
+function box(parent,w,h,d,mat,x,y,z){ const b=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),mat); b.position.set(x,y,z); parent.add(b); return b; }
+function cord(parent,pts,color=0x1f1f1f,r=0.012){
+  const c=new THREE.CatmullRomCurve3(pts.map(V));
+  const m=new THREE.Mesh(new THREE.TubeGeometry(c,Math.max(12,pts.length*14),r,6,false),M(color));
+  parent.add(m); return m;
+}
+function rr(g,x,y,w,h,r){ g.beginPath(); g.moveTo(x+r,y); g.arcTo(x+w,y,x+w,y+h,r); g.arcTo(x+w,y+h,x,y+h,r); g.arcTo(x,y+h,x,y,r); g.arcTo(x,y,x+w,y,r); g.closePath(); }
+function wrap(g,text,maxW){
+  const lines=[]; let line='';
+  for(const ch of text){
+    if(ch==='\n'){ lines.push(line); line=''; continue; }
+    const t=line+ch;
+    if(g.measureText(t).width>maxW && line){ lines.push(line); line=ch; } else line=t;
+  }
+  if(line) lines.push(line);
+  return lines;
+}
+function para(g,str,x,y,size,color,maxW,lh,draw,bold){
+  g.font=`${bold?'bold ':''}${size}px ${FONT}`;
+  const lines=wrap(g,str,maxW);
+  if(draw){ g.fillStyle=color; g.textBaseline='top'; g.textAlign='left'; lines.forEach((l,i)=>g.fillText(l,x,y+i*size*lh)); }
+  return y+lines.length*size*lh;
+}
+const smooth=(a,b,x)=>{ const t=clamp((x-a)/(b-a),0,1); return t*t*(3-2*t); };
+function buildPipes(list,r,mat){
+  const im=new THREE.InstancedMesh(new THREE.CylinderGeometry(r,r,1,8,1,true),mat,list.length);
+  const m=new THREE.Matrix4(), q=new THREE.Quaternion();
+  list.forEach(([a,b],i)=>{ const A=V(a),B=V(b),d=B.clone().sub(A),len=d.length();
+    q.setFromUnitVectors(UP,d.normalize()); m.compose(A.clone().add(B).multiplyScalar(0.5),q,new THREE.Vector3(1,len,1)); im.setMatrixAt(i,m); });
+  im.instanceMatrix.needsUpdate=true; im.computeBoundingSphere(); return im;
+}
+function buildBoxes(list,mat){
+  const im=new THREE.InstancedMesh(new THREE.BoxGeometry(1,1,1),mat,list.length);
+  const m=new THREE.Matrix4(), q=new THREE.Quaternion();
+  list.forEach((it,i)=>{ m.compose(V(it.pos),q,V(it.size)); im.setMatrixAt(i,m); });
+  im.instanceMatrix.needsUpdate=true; im.computeBoundingSphere(); return im;
+}
+function noiseFill(g,w,h,base,n,rgb,a){
+  g.fillStyle=base; g.fillRect(0,0,w,h);
+  for(let i=0;i<n;i++){ const v=Math.random(); g.fillStyle=`rgba(${rgb(v)},${a})`; g.fillRect(Math.random()*w,Math.random()*h,2,2); }
+}
+const TEX={
+  ground:()=>canvasTex(256,256,(g,w,h)=>noiseFill(g,w,h,'#8a7657',2500,v=>{const c=100+v*60|0;return `${c},${c-20},${c-50}`;},0.5),[150,150]),
+  pad:(r)=>canvasTex(256,256,(g,w,h)=>{ noiseFill(g,w,h,'#9a9a96',1500,v=>{const c=130+v*50|0;return `${c},${c},${c}`;},0.5); g.strokeStyle='#7d7d79'; g.lineWidth=3; g.strokeRect(0,0,w,h); },r),
+  concrete:(r,base='#a9a69f')=>canvasTex(256,256,(g,w,h)=>{ noiseFill(g,w,h,base,3000,v=>{const c=140+v*50|0;return `${c},${c-2},${c-6}`;},0.35);
+    g.fillStyle='rgba(80,80,80,0.25)'; for(let i=0;i<4;i++){ g.beginPath(); g.arc(Math.random()*w,Math.random()*h,2,0,7); g.fill(); } },r),
+  plank:()=>canvasTex(512,128,(g,w,h)=>{ g.fillStyle='#8f969d'; g.fillRect(0,0,w,h); g.fillStyle='#6b7178';
+    for(let x=14;x<w;x+=22) for(let y=14;y<h;y+=22){ g.beginPath(); g.arc(x,y,5,0,Math.PI*2); g.fill(); }
+    g.strokeStyle='#5d636a'; g.lineWidth=6; g.strokeRect(0,0,w,h); }),
+  building:(r)=>canvasTex(512,512,(g,w,h)=>{ noiseFill(g,w,h,'#bdb8ae',3000,v=>{const c=160+v*40|0;return `${c},${c-4},${c-12}`;},0.4);
+    for(let row=0;row<2;row++){ g.fillStyle='#a6a197'; g.fillRect(0,row*256,w,16);
+      for(let c=0;c<2;c++){ g.fillStyle='#46525e'; g.fillRect(c*256+44,row*256+70,168,130); g.fillStyle='#5d6b78'; g.fillRect(c*256+44,row*256+70,168,10);} } },r),
+  label:(text,{w=512,h=160,bg='#fff',fg='#111',size=64,border=null}={})=>canvasTex(w,h,(g)=>{
+    g.fillStyle=bg; g.fillRect(0,0,w,h); if(border){ g.strokeStyle=border; g.lineWidth=12; g.strokeRect(6,6,w-12,h-12); }
+    g.fillStyle=fg; g.font=`bold ${size}px ${FONT}`; g.textAlign='center'; g.textBaseline='middle';
+    const ls=text.split('\n'); ls.forEach((l,i)=>g.fillText(l,w/2,h/2+(i-(ls.length-1)/2)*size*1.15)); }),
+};
+function addFarCity(g){
+  const n=70; const im=new THREE.InstancedMesh(new THREE.BoxGeometry(1,1,1), new THREE.MeshLambertMaterial({color:0xffffff}), n);
+  const m=new THREE.Matrix4(), q=new THREE.Quaternion(), col=new THREE.Color();
+  for(let i=0;i<n;i++){
+    const a=Math.random()*Math.PI*2, r=80+Math.random()*180;
+    const w=10+Math.random()*25, h=8+Math.random()*55, d=10+Math.random()*25;
+    q.setFromAxisAngle(UP,Math.random()*Math.PI);
+    m.compose(new THREE.Vector3(Math.cos(a)*r,h/2,Math.sin(a)*r),q,new THREE.Vector3(w,h,d));
+    im.setMatrixAt(i,m); const v=0.6+Math.random()*0.3; im.setColorAt(i,col.setRGB(v,v,v*1.03));
+  }
+  im.instanceColor.needsUpdate=true; g.add(im);
+}
+
+// 作業員（前向き＝-Z）。hand:[x,y,z]＝手の位置（作業員基準、xは左右反転）
+function makeWorker(o={}){
+  const g=new THREE.Group();
+  const wear=M(o.wear||0x3b5b8c), pants=M(o.pants||0x2b3a55), skin=M(0xe0b48a), hm=M(o.helmet||0xffffff), boot=M(0x222222);
+  const hz=M(0xff7a00);
+  for(const sx of [-0.1,0.1]){ box(g,0.14,0.82,0.16,pants,sx,0.41,0); box(g,0.15,0.08,0.26,boot,sx,0.04,-0.03);
+    if(o.harness) box(g,0.17,0.05,0.19,hz,sx,0.7,0); }
+  const up=new THREE.Group(); up.position.set(0,0.82,0); up.rotation.x=o.lean||0; g.add(up);
+  box(up,0.42,0.6,0.24,wear,0,0.3,0);
+  const head=new THREE.Group(); head.position.set(0,0.76,0); head.rotation.x=o.headUp||0; up.add(head);
+  head.add(new THREE.Mesh(new THREE.SphereGeometry(0.11,16,12),skin));
+  const hel=new THREE.Mesh(new THREE.SphereGeometry(0.135,16,8,0,Math.PI*2,0,Math.PI/2),hm); hel.position.y=0.03; head.add(hel);
+  const eyeM=M(0x111111); for(const ex of [-0.04,0.04]){ const e=new THREE.Mesh(new THREE.SphereGeometry(0.014,8,6),eyeM); e.position.set(ex,0.0,-0.1); head.add(e); }
+  if(o.glasses){
+    const gm=new THREE.MeshLambertMaterial({color:0x7dd3fc,transparent:true,opacity:0.75});
+    const gl=box(head,0.21,0.06,0.03,gm,0,0,-0.115);
+    const frame=box(head,0.23,0.075,0.02,M(0x1f2937),0,0,-0.105);
+    if(o.glasses==='up'){ for(const m of [gl,frame]){ m.position.y=0.115; m.position.z-=0.03; m.rotation.x=-0.6; } }
+  }
+  if(o.harness){
+    box(up,0.44,0.06,0.26,hz,0,0.06,0);
+    bar([-0.12,0.58,-0.125],[-0.08,0.08,-0.125],0.035,hz,up); bar([0.12,0.58,-0.125],[0.08,0.08,-0.125],0.035,hz,up);
+    bar([-0.12,0.58,0.125],[0.0,0.45,0.125],0.035,hz,up); bar([0.12,0.58,0.125],[0.0,0.45,0.125],0.035,hz,up);
+  }
+  up.updateMatrix(); const inv=up.matrix.clone().invert();
+  for(const sx of [-1,1]){
+    const sh=[0.24*sx,0.55,0];
+    const hand = (o.hand && !(o.oneHand && sx<0)) ? V([o.hand[0]*sx,o.hand[1],o.hand[2]]).applyMatrix4(inv).toArray() : [0.27*sx,0.0,0.02];
+    bar(sh,hand,0.1,wear,up);
+    if(o.gloves){ const gl=box(up,0.1,0.12,0.06,gunteMat(),hand[0],hand[1],hand[2]); gl.rotation.x=0.3; }
+  }
+  const dring=V([0,0.5,0.13]).applyMatrix4(up.matrix);
+  const lan=M(0x1f1f1f), hookM=M(0x9ca3af);
+  if(o.lanyard==='floor'){
+    const p1=[0.12,0.7,0.32], p2=[0.32,0.02,0.4];
+    bar(dring.toArray(),p1,0.025,lan,g); bar(p1,p2,0.025,lan,g);
+    const hk=new THREE.Mesh(new THREE.TorusGeometry(0.045,0.012,8,16,Math.PI*1.6),hookM); hk.rotation.x=Math.PI/2; hk.position.set(...p2); g.add(hk);
+  } else if(o.lanyard==='hooked'){
+    const p1=[0.25,1.6,0.1], p2=o.hookTo;
+    bar(dring.toArray(),p1,0.025,lan,g); bar(p1,p2,0.025,lan,g);
+    const hk=new THREE.Mesh(new THREE.TorusGeometry(0.045,0.012,8,16,Math.PI*1.6),hookM); hk.position.set(...p2); g.add(hk);
+  }
+  return g;
+}
+
+// ---------- 現在のシナリオの状態 ----------
+let cur=null, worldGroup=null, pickWorld=[], rayTargets=[], hazards=[], hitBoxes=[];
+const pick=(...o)=>pickWorld.push(...o);
+const ray=(...o)=>rayTargets.push(...o);
+const both=(...o)=>{ pick(...o); ray(...o); };
+
+/* =====================================================================
+   資材・小物ライブラリ（ひと目で何か分かるよう、印刷・ラベル付き）
+   ===================================================================== */
+const _tc=new Map();
+function ptex(key,w,h,draw){ let t=_tc.get(key); if(!t){ t=canvasTex(w,h,draw); _tc.set(key,t); } return t; }
+function txt(c,t,x,y,size,color='#111',bold=true,align='center'){ c.font=`${bold?'bold ':''}${size}px ${FONT}`; c.fillStyle=color; c.textAlign=align; c.textBaseline='middle'; c.fillText(t,x,y); }
+function grain(c,w,h,base,line){ c.fillStyle=base; c.fillRect(0,0,w,h); c.strokeStyle=line; c.globalAlpha=0.35;
+  for(let i=0;i<40;i++){ c.lineWidth=1+Math.random()*2; const y=Math.random()*h; c.beginPath(); c.moveTo(0,y); c.bezierCurveTo(w*0.3,y+Math.random()*10-5,w*0.6,y+Math.random()*10-5,w,y+Math.random()*6-3); c.stroke(); }
+  c.globalAlpha=1; }
+const TM=t=>new THREE.MeshLambertMaterial({map:t});
+const hex=c=>'#'+c.toString(16).padStart(6,'0');
+// 面ごとに模様を貼れる箱（top=上面, side=前後, end=左右）
+function pbox(w,h,d,o={}){
+  const mk=v=>v==null?M(o.color??0x999999):(typeof v==='number'?M(v):TM(v));
+  const side=o.side, end=o.end??o.side, top=o.top??o.side;
+  return new THREE.Mesh(new THREE.BoxGeometry(w,h,d),[mk(end),mk(end),mk(top),M(o.bottom??0x666666),mk(side),mk(o.back??side)]);
+}
+const KRAFT='#cfae7c';
+const P={
+  pallet(){ const g=new THREE.Group(); for(let i=0;i<5;i++) box(g,1.1,0.025,0.16,M(0xb08a5a),0,0.125,-0.44+i*0.22); for(const z of [-0.45,0,0.45]) box(g,1.1,0.1,0.09,M(0x9a7748),0,0.05,z); return g; },
+  bag(kind='cement'){
+    const K={cement:['普通ポルトランド','セメント 25kg','#c62828'],mortar:['既調合モルタル','25kg','#2e7d32'],sand:['けい砂','20kg','#1565c0'],plaster:['しっくい','20kg','#6a1b9a'],tile:['タイル接着剤','20kg','#ef6c00']}[kind];
+    const top=ptex('bag'+kind,256,384,(c,w,h)=>{ c.fillStyle=KRAFT; c.fillRect(0,0,w,h); c.fillStyle=K[2]; c.fillRect(0,40,w,70); c.fillRect(0,h-60,w,22);
+      txt(c,K[0],w/2,75,30,'#fff'); txt(c,K[1],w/2,190,44,K[2]); c.strokeStyle='rgba(0,0,0,0.15)'; c.lineWidth=3; c.strokeRect(6,6,w-12,h-12); });
+    const side=ptex('bags'+kind,256,64,(c,w,h)=>{ c.fillStyle=KRAFT; c.fillRect(0,0,w,h); c.fillStyle=K[2]; c.fillRect(0,20,w,16); });
+    return pbox(0.42,0.11,0.62,{top,side}); },
+  bagStack(kind,layers=3){ const g=P.pallet();
+    for(let l=0;l<layers;l++) for(let i=0;i<2;i++){ const b=P.bag(kind); const r=l%2; b.rotation.y=r?Math.PI/2:0; b.position.set(r?0:(i?0.23:-0.23),0.205+l*0.11,r?(i?0.23:-0.23):0); g.add(b); }
+    return g; },
+  cardboard(w=0.45,h=0.3,d=0.35,label='資材'){
+    const top=ptex('cbt',256,256,(c,W,H)=>{ c.fillStyle=KRAFT; c.fillRect(0,0,W,H); c.fillStyle='#e8d3a8'; c.fillRect(W*0.42,0,W*0.16,H); c.strokeStyle='#a8865a'; c.lineWidth=3; c.beginPath(); c.moveTo(0,H/2); c.lineTo(W,H/2); c.stroke(); });
+    const side=ptex('cbs'+label,256,192,(c,W,H)=>{ c.fillStyle=KRAFT; c.fillRect(0,0,W,H); c.fillStyle='#e8d3a8'; c.fillRect(0,0,W,18); txt(c,label,W/2,H/2+6,Math.min(58,330/label.length),'#3b2a14'); txt(c,'↑↑',W-30,H-24,24,'#3b2a14'); });
+    return pbox(w,h,d,{top,side}); },
+  gypsum(n=8){ const g=new THREE.Group();
+    const top=ptex('gyt',256,512,(c,W,H)=>{ c.fillStyle='#f1efe8'; c.fillRect(0,0,W,H); txt(c,'石膏ボード',W/2,H*0.42,40,'#1d4ed8'); txt(c,'12.5mm 910×1820',W/2,H*0.52,22,'#1d4ed8',false); c.strokeStyle='#d6d3cc'; c.lineWidth=6; c.strokeRect(0,0,W,H); });
+    const side=ptex('gys',256,64,(c,W,H)=>{ c.fillStyle='#e7e5e4'; c.fillRect(0,0,W,H); c.strokeStyle='#bdb8ae'; for(let y=4;y<H;y+=8){ c.beginPath(); c.moveTo(0,y); c.lineTo(W,y); c.stroke(); } });
+    for(const z of [-0.6,0.6]) box(g,0.95,0.08,0.09,M(0x9a7748),0,0.04,z);
+    const st=pbox(0.91,0.0125*n,1.82,{top,side}); st.position.y=0.08+0.0125*n/2; g.add(st); return g; },
+  plywood(w=0.9,h=1.8){ const t=ptex('ply',256,512,(c,W,H)=>{ grain(c,W,H,'#d9b47e','#a97f45'); c.save(); c.translate(W/2,H/2); c.rotate(-0.1); txt(c,'コンパネ',0,0,46,'#8b1a1a'); txt(c,'12mm',0,48,26,'#8b1a1a',false); c.restore(); });
+    return pbox(w,h,0.012,{side:t,end:0xc9a66b,top:0xc9a66b}); },
+  styro(w=0.9,d=0.6,t=0.05){ const tx=ptex('sty',256,192,(c,W,H)=>{ c.fillStyle='#9fd0f2'; c.fillRect(0,0,W,H); txt(c,'スタイロフォーム',W/2,H/2-10,26,'#1e3a8a'); txt(c,'（断熱材）',W/2,H/2+26,20,'#1e3a8a',false); });
+    return pbox(w,t,d,{top:tx,side:0x93c5fd}); },
+  block(){ const top=ptex('blkt',128,64,(c,W,H)=>{ noiseFill(c,W,H,'#9e9b94',300,v=>{const k=130+v*40|0;return `${k},${k},${k}`;},0.5); c.fillStyle='#4b4a46'; c.fillRect(14,14,40,36); c.fillRect(74,14,40,36); });
+    const side=ptex('blks',128,64,(c,W,H)=>noiseFill(c,W,H,'#a19e97',400,v=>{const k=130+v*40|0;return `${k},${k},${k}`;},0.5));
+    return pbox(0.39,0.19,0.15,{top,side}); },
+  blockStack(nx=2,nz=3,ny=3){ const g=P.pallet(); for(let y=0;y<ny;y++) for(let i=0;i<nx;i++) for(let k=0;k<nz;k++){ const b=P.block(); b.position.set(-0.2+i*0.4,0.245+y*0.19,-0.3+k*0.3); g.add(b); } return g; },
+  tiles(n=10){ const t=ptex('tile',256,256,(c,W,H)=>{ c.fillStyle='#f8fafc'; c.fillRect(0,0,W,H); c.strokeStyle='#cbd5e1'; c.lineWidth=5; c.strokeRect(3,3,W-6,H-6); });
+    return pbox(0.3,0.008*n,0.3,{top:t,side:0xe2e8f0}); },
+  pail(color='#2563eb',label='水'){ const s=ptex('pail'+color+label,256,96,(c,W,H)=>{ c.fillStyle=color; c.fillRect(0,0,W,H); c.fillStyle='#fff'; c.fillRect(W*0.25,20,W*0.5,56); txt(c,label,W/2,48,Math.min(34,210/label.length),'#111'); });
+    const g=new THREE.Group(); const m=new THREE.Mesh(new THREE.CylinderGeometry(0.15,0.13,0.34,20),[TM(s),M(0xd1d5db),M(0x333333)]); m.position.y=0.17; g.add(m);
+    const hd=new THREE.Mesh(new THREE.TorusGeometry(0.15,0.006,6,20,Math.PI),M(0x9ca3af)); hd.position.y=0.34; g.add(hd); return g; },
+  tub(){ const g=new THREE.Group(); const m=M(0x1f1f1f);
+    box(g,0.9,0.03,0.6,m,0,0.015,0); box(g,0.9,0.22,0.03,m,0,0.12,-0.3); box(g,0.9,0.22,0.03,m,0,0.12,0.3); box(g,0.03,0.22,0.6,m,-0.45,0.12,0); box(g,0.03,0.22,0.6,m,0.45,0.12,0);
+    const mo=new THREE.Mesh(new THREE.PlaneGeometry(0.86,0.56),M(0x8f8a80)); mo.rotation.x=-Math.PI/2; mo.position.y=0.12; g.add(mo);
+    const lab=new THREE.Mesh(new THREE.PlaneGeometry(0.3,0.08),TM(TEX.label('トロ舟',{w:256,h:72,size:40,bg:'#1f1f1f',fg:'#fff'}))); lab.position.set(0,0.15,0.317); g.add(lab); return g; },
+  toolbox(color=0xc62828){ const g=new THREE.Group();
+    const t=ptex('tb'+color,256,96,(c,W,H)=>{ c.fillStyle=hex(color); c.fillRect(0,0,W,H); c.fillStyle='#d1d5db'; c.fillRect(30,24,30,26); c.fillRect(W-60,24,30,26); txt(c,'工具箱',W/2,H-24,26,'#fff'); });
+    const b=pbox(0.5,0.22,0.22,{side:t,top:color,end:color}); b.position.y=0.11; g.add(b);
+    bar([-0.15,0.22,0],[-0.15,0.3,0],0.02,M(0x111111),g); bar([0.15,0.22,0],[0.15,0.3,0],0.02,M(0x111111),g); bar([-0.15,0.3,0],[0.15,0.3,0],0.025,M(0x111111),g); return g; },
+  cone(){ const g=new THREE.Group(); box(g,0.36,0.03,0.36,M(0x111111),0,0.015,0);
+    const c=new THREE.Mesh(new THREE.ConeGeometry(0.15,0.62,14),M(0xf26b1d)); c.position.y=0.34; g.add(c);
+    const rAt=y=>0.15*(1-(y-0.03)/0.62)+0.004;
+    for(const y of [0.3,0.46]){ const b=new THREE.Mesh(new THREE.CylinderGeometry(rAt(y+0.035),rAt(y-0.035),0.07,14,1,true),M(0xffffff)); b.position.y=y; g.add(b); }
+    return g; },
+  extinguisher(){ const g=new THREE.Group(); const t=ptex('ext',128,128,(c,W,H)=>{ c.fillStyle='#d32f2f'; c.fillRect(0,0,W,H); c.fillStyle='#fff'; c.fillRect(16,34,96,56); txt(c,'消火器',64,62,26,'#d32f2f'); });
+    const b=new THREE.Mesh(new THREE.CylinderGeometry(0.08,0.08,0.5,16),[TM(t),M(0xd32f2f),M(0x333333)]); b.position.y=0.27; g.add(b); box(g,0.05,0.07,0.05,M(0x111111),0,0.55,0);
+    cord(g,[[0.02,0.56,0],[0.09,0.45,0.03],[0.09,0.15,0.05]],0x111111,0.01); return g; },
+  cableDrum(label='CVTケーブル'){ const g=new THREE.Group();
+    const t=ptex('drum'+label,256,256,(c,W,H)=>{ grain(c,W,H,'#b08a5a','#7c5a35'); c.beginPath(); c.arc(W/2,H/2,30,0,7); c.fillStyle='#3f2a14'; c.fill(); txt(c,label,W/2,H*0.24,28,'#1f1f1f'); });
+    for(const s of [-0.22,0.22]){ const c=new THREE.Mesh(new THREE.CylinderGeometry(0.4,0.4,0.04,24),[M(0x9a7748),TM(t),TM(t)]); c.rotation.x=Math.PI/2; c.position.set(0,0.4,s); g.add(c); }
+    const core=new THREE.Mesh(new THREE.CylinderGeometry(0.3,0.3,0.42,20),M(0x1f1f1f)); core.rotation.x=Math.PI/2; core.position.y=0.4; g.add(core); return g; },
+  reel(wound=false,elcb=false){ const g=new THREE.Group();
+    const dr=new THREE.Mesh(new THREE.CylinderGeometry(0.17,0.17,0.12,20),M(elcb?0x2563eb:0xf59e0b)); dr.rotation.x=Math.PI/2; dr.position.y=0.22; g.add(dr);
+    for(const s of [-0.08,0.08]){ bar([-0.15,0,s],[0,0.42,s],0.025,M(0x374151),g); bar([0.15,0,s],[0,0.42,s],0.025,M(0x374151),g); }
+    bar([0,0.42,-0.1],[0,0.42,0.1],0.03,M(0x111111),g);
+    if(wound){ const w=new THREE.Mesh(new THREE.TorusGeometry(0.12,0.045,8,20),M(0x111111)); w.position.y=0.22; g.add(w); }
+    const lab=new THREE.Mesh(new THREE.PlaneGeometry(0.22,0.07),TM(ptex('rl'+elcb,256,80,(c,W,H)=>{ c.fillStyle=elcb?'#16a34a':'#fff'; c.fillRect(0,0,W,H); txt(c,elcb?'漏電遮断器付':'コードリール',W/2,H/2,30,elcb?'#fff':'#111'); })));
+    lab.position.set(0,0.22,0.065); g.add(lab); return g; },
+  trash(){ const g=new THREE.Group(); const t=ptex('trash',256,96,(c,W,H)=>{ c.fillStyle='#1d4ed8'; c.fillRect(0,0,W,H); txt(c,'ゴミ・端材',W/2,H/2,34,'#fff'); });
+    const b=new THREE.Mesh(new THREE.CylinderGeometry(0.25,0.22,0.6,20,1,true),new THREE.MeshLambertMaterial({map:t,side:THREE.DoubleSide})); b.position.y=0.3; g.add(b); return g; },
+  polytank(label='水',color='#e0f2fe'){ const g=new THREE.Group();
+    const t=ptex('pt'+label+color,192,256,(c,W,H)=>{ c.fillStyle=color; c.fillRect(0,0,W,H); c.fillStyle='#fff'; c.fillRect(16,80,W-32,110); txt(c,label,W/2,135,Math.min(52,280/label.length),'#1e40af'); });
+    const b=pbox(0.3,0.4,0.22,{side:t,top:0xbfdbfe,end:0xbfdbfe}); b.position.y=0.2; g.add(b);
+    const cap=new THREE.Mesh(new THREE.CylinderGeometry(0.035,0.035,0.04,10),M(0x1d4ed8)); cap.position.set(0.08,0.42,0); g.add(cap); return g; },
+  wheelbarrow(){ const g=new THREE.Group();
+    const tray=new THREE.Mesh(new THREE.CylinderGeometry(0.4,0.25,0.25,4,1,true),new THREE.MeshLambertMaterial({color:0x15803d,side:THREE.DoubleSide})); tray.rotation.y=Math.PI/4; tray.scale.set(1.2,1,0.8); tray.position.y=0.55; g.add(tray);
+    const wh=new THREE.Mesh(new THREE.TorusGeometry(0.17,0.05,8,16),M(0x111111)); wh.rotation.y=Math.PI/2; wh.position.set(0.55,0.2,0); g.add(wh);
+    for(const s of [-0.22,0.22]){ bar([0.55,0.2,0],[-0.75,0.6,s],0.03,M(0x6b7280),g); bar([-0.35,0,s],[-0.35,0.45,s],0.03,M(0x6b7280),g); } return g; },
+  sandbag(label='ガラ'){ const t=ptex('sb'+label,192,192,(c,W,H)=>{ c.fillStyle='#e5e2d8'; c.fillRect(0,0,W,H); c.strokeStyle='rgba(0,0,0,0.08)'; for(let i=0;i<W;i+=6){ c.beginPath(); c.moveTo(i,0); c.lineTo(i,H); c.stroke(); } txt(c,label,W/2,H/2,Math.min(60,320/label.length),'#b91c1c'); });
+    return pbox(0.45,0.2,0.65,{top:t,side:0xd6d3cc}); },
+  sign(text,{bg='#1e3a5f',fg='#fff',w=0.9,h=0.25}={}){ const H=Math.round(512*h/w); const lines=text.split('\n').length;
+    return new THREE.Mesh(new THREE.PlaneGeometry(w,h),TM(TEX.label(text,{w:512,h:H,size:Math.round(H*(lines>1?0.34:0.5)),bg,fg}))); },
+  bench(w=1.2,d=0.6,h=0.85){ const g=new THREE.Group(); const t=ptex('bench',256,128,(c,W,H)=>grain(c,W,H,'#b98d58','#7c5a35'));
+    const top=pbox(w,0.05,d,{top:t,side:0x8a6a40}); top.position.y=h; g.add(top);
+    for(const [x,z] of [[-w/2+0.05,-d/2+0.05],[w/2-0.05,-d/2+0.05],[-w/2+0.05,d/2-0.05],[w/2-0.05,d/2-0.05]]) bar([x,0,z],[x,h-0.02,z],0.045,M(0x6b7280),g);
+    box(g,w-0.1,0.03,d-0.1,M(0x9ca3af),0,0.25,0); return g; },
+  shelf(fill){ const s=new THREE.Group(); const fm=M(0x6b7280);
+    for(const dx of [-0.6,0.6]) for(const dz of [-0.2,0.2]) bar([dx,0,dz],[dx,1.8,dz],0.035,fm,s);
+    for(const y of [0.3,0.9,1.5]) box(s,1.25,0.03,0.45,M(0x9ca3af),0,y,0); if(fill) fill(s); return s; },
+  cart(){ const c=new THREE.Group(); const t=ptex('cart',256,160,(cc,W,H)=>{ cc.fillStyle='#1d4ed8'; cc.fillRect(0,0,W,H); txt(cc,'台 車',W/2,H/2,52,'#fff'); });
+    const deck=pbox(0.9,0.05,0.6,{top:t,side:0x1e3a8a}); deck.position.y=0.22; c.add(deck);
+    for(const [x,z] of [[-0.38,-0.24],[0.38,-0.24],[-0.38,0.24],[0.38,0.24]]){ const wh=new THREE.Mesh(new THREE.CylinderGeometry(0.06,0.06,0.04,10),M(0x111111)); wh.rotation.x=Math.PI/2; wh.position.set(x,0.06,z); c.add(wh); }
+    bar([0.45,0.22,-0.28],[0.45,0.95,-0.28],0.03,M(0x6b7280),c); bar([0.45,0.22,0.28],[0.45,0.95,0.28],0.03,M(0x6b7280),c); bar([0.45,0.95,-0.28],[0.45,0.95,0.28],0.03,M(0x6b7280),c); return c; },
+  ladder(len=2.4){ const g=new THREE.Group(); const m=M(0xcdd2d9); bar([-0.2,0,0],[-0.2,len,0],0.05,m,g); bar([0.2,0,0],[0.2,len,0],0.05,m,g); for(let y=0.3;y<len;y+=0.3) bar([-0.2,y,0],[0.2,y,0],0.03,m,g); return g; },
+  steel(){ const g=new THREE.Group(); const m=M(0x6b7280);
+    for(let i=0;i<4;i++) for(let j=0;j<2;j++) box(g,2.0,0.04,0.04,m,0,0.08+j*0.045,-0.08+i*0.05);
+    for(const x of [-0.7,0.7]) box(g,0.08,0.06,0.3,M(0x9a7748),x,0.03,0); for(const x of [-0.4,0.4]) box(g,0.02,0.12,0.24,M(0xf59e0b),x,0.1,0);
+    const tag=new THREE.Mesh(new THREE.PlaneGeometry(0.24,0.09),TM(TEX.label('アングル',{w:256,h:96,size:44,bg:'#fef3c7'}))); tag.position.set(0.85,0.13,0.135); g.add(tag); return g; },
+  discBox(){ const t=ptex('disc',256,160,(c,W,H)=>{ c.fillStyle='#1e40af'; c.fillRect(0,0,W,H); c.beginPath(); c.arc(60,H/2,45,0,7); c.fillStyle='#9ca3af'; c.fill(); txt(c,'切断砥石',165,H/2-14,30,'#fff'); txt(c,'105mm',165,H/2+22,22,'#fde68a'); });
+    return pbox(0.25,0.08,0.13,{side:t,top:t,end:0x1e40af}); },
+  fan(){ const fan=new THREE.Group(); const ring=new THREE.Mesh(new THREE.TorusGeometry(0.3,0.03,8,24),M(0x1f2937)); ring.rotation.y=Math.PI/2; fan.add(ring);
+    const hub=new THREE.Mesh(new THREE.CylinderGeometry(0.08,0.08,0.12,12),M(0x374151)); hub.rotation.z=Math.PI/2; fan.add(hub);
+    for(let i=0;i<4;i++){ const b=box(fan,0.02,0.22,0.08,M(0x9ca3af),0,0,0); b.rotation.x=i*Math.PI/2; b.translateY(0.13); }
+    bar([0,0,0],[0,-0.75,0],0.05,M(0x1f2937),fan); box(fan,0.4,0.03,0.4,M(0x1f2937),0,-0.74,0);
+    const lab=new THREE.Mesh(new THREE.PlaneGeometry(0.2,0.07),TM(TEX.label('送風機',{w:256,h:90,size:44,bg:'#fff'}))); lab.position.set(0,-0.35,0.03); fan.add(lab); return fan; },
+};
+// 3部屋の室内（A:x-9〜-3 / B:-3〜3 / C:3〜9、奥行き z-5〜0、出入口は z-3.1〜-1.9）
+function buildShell(g,o={}){
+  const CH=o.CH||2.8;
+  const ground=new THREE.Mesh(new THREE.PlaneGeometry(400,400),TM(TEX.ground())); ground.rotation.x=-Math.PI/2; ground.position.y=-0.01; g.add(ground); pick(ground);
+  addFarCity(g);
+  const floor=new THREE.Mesh(new THREE.PlaneGeometry(18,5),TM(TEX.concrete([9,3],o.floor||'#a3a09a'))); floor.rotation.x=-Math.PI/2; floor.position.set(0,0,-2.5); g.add(floor); both(floor);
+  const ceil=new THREE.Mesh(new THREE.PlaneGeometry(18,5),M(0xd6d3cc)); ceil.rotation.x=Math.PI/2; ceil.position.set(0,CH,-2.5); g.add(ceil); both(ceil);
+  const wm=TM(TEX.concrete([3,1],o.wall||'#b8b4ab'));
+  const wall=(w,h,d,x,y,z)=>{ const m=box(g,w,h,d,wm,x,y,z); both(m); return m; };
+  wall(18.24,CH,0.12,0,CH/2,0.06);
+  const bo=o.back;
+  if(bo){ const lw=bo.x0+9, rw=9-bo.x1, ow=bo.x1-bo.x0, oc=(bo.x0+bo.x1)/2;
+    wall(lw,CH,0.12,-9+lw/2,CH/2,-5.06); wall(rw,CH,0.12,bo.x1+rw/2,CH/2,-5.06); wall(ow,bo.y0,0.12,oc,bo.y0/2,-5.06); wall(ow,CH-bo.y1,0.12,oc,(CH+bo.y1)/2,-5.06);
+  } else wall(18,CH,0.12,0,CH/2,-5.06);
+  const lo=o.left;
+  if(lo){ const a=lo.z0+5, b=-lo.z1, ow=lo.z1-lo.z0, oc=(lo.z0+lo.z1)/2;
+    wall(0.12,CH,a,-9.06,CH/2,-5+a/2); wall(0.12,CH,b,-9.06,CH/2,lo.z1+b/2); wall(0.12,lo.y0,ow,-9.06,lo.y0/2,oc); wall(0.12,CH-lo.y1,ow,-9.06,(CH+lo.y1)/2,oc);
+    for(const y of [lo.y0,lo.y1]) box(g,0.08,0.06,ow,M(0x6b7280),-9.02,y,oc);
+  } else wall(0.12,CH,5,-9.06,CH/2,-2.5);
+  wall(0.12,CH,5,9.06,CH/2,-2.5);
+  for(const x of [-3,3]){ wall(0.12,CH,1.9,x,CH/2,-4.05); wall(0.12,CH,1.9,x,CH/2,-0.95); wall(0.12,CH-2.1,1.2,x,(CH+2.1)/2,-2.5); }
+  for(const x of [-6,0,6]){ const pl=new THREE.PointLight(0xfff6e0,6,11,1.4); pl.position.set(x,CH-0.25,-2.5); g.add(pl);
+    box(g,1.2,0.05,0.2,new THREE.MeshBasicMaterial({color:0xfffbe8}),x,CH-0.03,-2.0); }
+  (o.names||[]).forEach((t,i)=>{ const s=P.sign(t,{w:1.2,h:0.26}); s.position.set([-6,0,6][i]+((o.signDx||[])[i]||0),CH-0.5,-4.99); g.add(s); });
+}
+
+/* =====================================================================
+   シナリオ定義
+   各シナリオの項目：
+     id, title, sky, fog, start, panel, bounds, blocks, ambient,
+     introTitle, introLines, timeLimit, hazards[], build(g), experience(h),
+     endTitle, endBody, clearCall, footer
+   hazards[]：name, short, center, size, measure, exp{from, look, text, (to)}
+   ===================================================================== */
+
+// ---------------- ロビー（シナリオ選択） ----------------
+const LOBBY={
+  id:'lobby', title:'シナリオ選択', sky:0xc7dbef, fog:[40,160],
+  start:[0,0,0], panel:[0,1.5,-2.0], bounds:[-2.5,2.5,-1,2.5], blocks:[], ambient:'none', hazards:[],
+  build(g){
+    const fl=new THREE.Mesh(new THREE.PlaneGeometry(80,80),M(0xe7e5e4)); fl.rotation.x=-Math.PI/2; g.add(fl); ray(fl);
+    const grid=new THREE.GridHelper(80,80,0x9ca3af,0xd1d5db); grid.position.y=0.005; g.add(grid);
+    const ring=new THREE.Mesh(new THREE.RingGeometry(1.2,1.35,48),new THREE.MeshBasicMaterial({color:0xf59e0b})); ring.rotation.x=-Math.PI/2; ring.position.y=0.01; g.add(ring);
+    for(let i=0;i<10;i++){ const a=i/10*Math.PI*2; const p=box(g,0.5,3+Math.sin(i)*0.8,0.5,M(i%2?0xf59e0b:0x334155),Math.cos(a)*9,1.5,Math.sin(a)*9); p.position.y=p.geometry.parameters.height/2; }
+  },
+};
+
+// ---------------- ① 足場からの墜落 ----------------
+const SC_ASHIBA=(()=>{
+  const H=12.6, LV=1.8, NL=7, ZO=-0.55, ZI=0.55, WALL_Z=0.78;
+  const XS=Array.from({length:11},(_,i)=>-9+i*1.8);
+  return {
+    id:'ashiba', title:'足場からの墜落', sky:0xb8d3ec, fog:[90,380],
+    start:[0,H,0.05], panel:[0,H+1.5,-1.9], ambient:'wind', timeLimit:90,
+    bounds:[-8.6,8.6,-0.35,0.42],
+    blocks:[[-7.3,-5.3,-1,0.03],[-3.35,-2.45,-1,0.05],[7.65,8.35,-1,0.15]],
+    introTitle:'足場からの墜落　危険予知（KY）体験',
+    introLines:[
+      ['ここは高さ約12.6m（7層目）の足場の上です。まずは足元と下をのぞいて、高さを確かめてください。','#fff'],
+      ['この足場には【墜落・転落につながる危険】が6か所あります。','#fde68a'],
+    ],
+    endTitle:'墜落…', endBody:'建設業の死亡災害で最も多いのが「墜落・転落」です。\nほんの一瞬の見落としが、命に関わります。',
+    clearCall:'指差し呼称「足場の安全、ヨシ！」',
+    footer:'作業開始前の点検（安衛則第567条）と指差し呼称で、危険の見落としをなくしましょう。',
+    hazards:[
+      { name:'手すり・中桟の欠落', short:'手すり・中桟なし', center:[4.5,H+0.5,-0.58], size:[1.85,1.2,0.42],
+        exp:{from:[4.5,H,-0.05], to:[4.5,H,-1.1], look:[4.5,H,-1.1], text:'手すりの無い端部でバランスを崩した瞬間…'},
+        measure:'作業床の端には高さ85cm以上の手すりと、高さ35〜50cmの中桟（＋幅木）を設ける（安衛則第563条）。作業のため一時的に外した場合は作業後ただちに復旧し、外している間はフルハーネス使用・立入禁止とする。' },
+      { name:'開口部（床板の抜け）', short:'開口部', center:[-6.3,H-0.05,-0.25], size:[1.85,0.5,0.6],
+        exp:{from:[-5.0,H,-0.25], to:[-6.3,H,-0.25], look:[-6.3,H,-0.25], text:'床板の無い開口部に気づかず踏み出した瞬間…'},
+        measure:'開口部には丈夫な覆い（蓋）や手すり・囲いを設け、表示をする（安衛則第519条）。床板を外したら作業後ただちに復旧し、作業中は立入禁止措置をとる。' },
+      { name:'フルハーネス未使用（フック未掛け）', short:'フック未掛け', center:[8.0,H+0.9,-0.15], size:[1.0,1.9,0.9],
+        exp:{from:[8.0,H,0.25], to:[8.0,H,-1.1], look:[8.0,H,-1.1], text:'フックを掛けずに身を乗り出した瞬間…'},
+        measure:'身を乗り出す作業や、手すり等の設置が困難な箇所ではフルハーネス型墜落制止用器具を使用し、フックを親綱など堅固な取付設備に常に掛ける（安衛則第518・521条）。高さ6.75mを超える箇所では原則フルハーネス型を使う。' },
+      { name:'床板の隙間・浮き', short:'床板の浮き・隙間', center:[2.7,H+0.05,0.15], size:[1.9,0.35,1.0],
+        exp:{from:[1.2,H,0.25], to:[2.7,H,0.25], look:[2.7,H,0.25], text:'浮いた床板を踏み、床板ごと外れた瞬間…'},
+        measure:'作業開始前に床材の浮き・ずれ・緊結状態を点検する（安衛則第567条）。床材間の隙間は3cm以下、床材と建地の隙間は12cm未満とし（同第563条）、床材は2か所以上で支持・固定する。' },
+      { name:'足場上での脚立の使用', short:'足場上の脚立', center:[-2.9,H+0.75,-0.22], size:[1.1,1.6,0.75],
+        exp:{from:[-2.9,H+1.0,0.05], to:[-2.9,H+1.0,-1.1], look:[-2.9,H+0.5,-1.1], text:'脚立に乗り、体が手すりより上に出た瞬間…'},
+        measure:'足場の作業床で脚立や踏台を使うと、体が手すりより高くなり墜落しやすい。足場上では原則使用しない。高さが足りない場合は足場の層を追加するなど、適切な作業床を設ける。' },
+      { name:'足元の資材・つまずき物', short:'足元の資材', center:[-1.0,H+0.15,0], size:[1.7,0.4,1.1],
+        exp:{from:[3.3,H,-0.05], to:[4.5,H,-1.1], look:[4.5,H,-1.1], text:'足元の資材につまずき、体勢を崩して手すりの切れ目へ…'},
+        measure:'作業床に資材・工具・ケーブルを放置しない。整理整頓し、資材は所定の置場にまとめて結束し、通路幅を確保する。工具の落下防止（ひも付き工具・幅木・メッシュシート）も合わせて行う。' },
+    ],
+    build(g){
+      const ground=new THREE.Mesh(new THREE.PlaneGeometry(800,800),new THREE.MeshLambertMaterial({map:TEX.ground()}));
+      ground.rotation.x=-Math.PI/2; g.add(ground); both(ground);
+      const pad=new THREE.Mesh(new THREE.PlaneGeometry(50,29.5),new THREE.MeshLambertMaterial({map:TEX.pad([12,7])}));
+      pad.rotation.x=-Math.PI/2; pad.position.set(0,0.02,-13.97); g.add(pad);
+      const bH=H+3.6;
+      const bld=new THREE.Mesh(new THREE.BoxGeometry(34,bH,20),new THREE.MeshLambertMaterial({map:TEX.building([8.5,2.25])}));
+      bld.position.set(0,bH/2,WALL_Z+10); g.add(bld); both(bld);
+      const fenceMat=M(0xe8ecef);
+      [[0,1.25,-28.7,50,2.5,0.1],[-25,1.25,-14,0.1,2.5,29.5],[25,1.25,-14,0.1,2.5,29.5]].forEach(a=>box(g,a[3],a[4],a[5],fenceMat,a[0],a[1],a[2]));
+      { const t=new THREE.Group(); t.position.set(-10,0,-14); t.rotation.y=0.3;
+        box(t,2.2,0.5,5,M(0x7b8794),0,1.1,0.6); box(t,2.2,1.9,1.7,M(0xf3f4f6),0,1.5,-2.6);
+        const wg=new THREE.CylinderGeometry(0.45,0.45,0.3,16), wm=M(0x222222);
+        [[-1.1,-2.3],[1.1,-2.3],[-1.1,1.6],[1.1,1.6]].forEach(([x,z])=>{ const w=new THREE.Mesh(wg,wm); w.rotation.z=Math.PI/2; w.position.set(x,0.45,z); t.add(w); });
+        g.add(t); }
+      { const a=P.bagStack('cement',3); a.position.set(7,0,-10); g.add(a); const b=P.steel(); b.position.set(9.5,0,-8); g.add(b); const c=P.blockStack(2,3,3); c.position.set(10.5,0,-10.5); g.add(c); const d=P.gypsum(10); d.position.set(5,0,-12); d.rotation.y=Math.PI/2; g.add(d); }
+      for(let x=-8;x<=8;x+=4){ const c=P.cone(); c.position.set(x,0,-3); g.add(c); }
+      addFarCity(g);
+
+      // 足場
+      const matPipe=M(0xa9afb6), matPlank=new THREE.MeshLambertMaterial({map:TEX.plank()}), matToe=M(0x8a9097);
+      const pipes=[], planksLow=[], planksTop=[], toes=[];
+      for(const x of XS) for(const z of [ZO,ZI]){ pipes.push([[x,0,z],[x,H+2.0,z]]); toes.push({pos:[x,0.02,z],size:[0.15,0.04,0.15]}); }
+      for(let k=1;k<=NL;k++){
+        const y=k*LV, top=(k===NL);
+        for(let i=0;i<10;i++){
+          const x0=XS[i], x1=XS[i+1], xc=(x0+x1)/2;
+          pipes.push([[x0,y-0.06,ZO],[x1,y-0.06,ZO]]); pipes.push([[x0,y-0.06,ZI],[x1,y-0.06,ZI]]);
+          if(!(top&&i===7)){ pipes.push([[x0,y+0.9,ZO],[x1,y+0.9,ZO]]); pipes.push([[x0,y+0.45,ZO],[x1,y+0.45,ZO]]); }
+          const u=i%2===0; pipes.push([[x0,u?y-LV:y,ZO-0.05],[x1,u?y:y-LV,ZO-0.05]]);
+          for(const zc of [-0.25,0.25]){
+            if(i===1&&zc<0) continue;
+            const it={pos:[xc,y-0.02,zc],size:[1.76,0.04,0.48]};
+            if(top){ if(i===6&&zc>0) continue; planksTop.push(it); } else planksLow.push(it);
+          }
+          if(top&&i!==7) toes.push({pos:[xc,y+0.075,ZO+0.03],size:[1.78,0.15,0.02]});
+        }
+        for(const x of XS) pipes.push([[x,y-0.06,ZO],[x,y-0.06,ZI]]);
+      }
+      for(const x of [-9,9]){ pipes.push([[x,H+0.9,ZO],[x,H+0.9,ZI]]); pipes.push([[x,H+0.45,ZO],[x,H+0.45,ZI]]); }
+      pipes.push([[-9,H+2.0,ZO],[9,H+2.0,ZO]]); pipes.push([[-9,H+2.0,ZI],[9,H+2.0,ZI]]);
+      const pipeMesh=buildPipes(pipes,0.0243,matPipe), low=buildBoxes(planksLow,matPlank), topP=buildBoxes(planksTop,matPlank), toeMesh=buildBoxes(toes,matToe);
+      g.add(pipeMesh,low,topP,toeMesh); pick(pipeMesh,low,topP,toeMesh); ray(topP,pipeMesh);
+      const rope=new THREE.Mesh(new THREE.CylinderGeometry(0.009,0.009,18,6),M(0xe8c547)); rope.rotation.z=Math.PI/2; rope.position.set(0,H+1.85,ZO+0.04); g.add(rope); pick(rope);
+      // 浮いた床板
+      const lp=new THREE.Mesh(new THREE.BoxGeometry(1.76,0.04,0.48),matPlank); lp.position.set(2.7,H-0.02+0.035,0.32); lp.rotation.set(-0.03,0,0.055); g.add(lp); both(lp);
+      // 脚立
+      const ladder=new THREE.Group(); ladder.position.set(-2.9,H,-0.22);
+      { const m=M(0xcdd2d9), hg=1.35, sp=0.38;
+        for(const s of [-0.2,0.2]){ bar([-sp,0,s],[0,hg,s],0.04,m,ladder); bar([sp,0,s],[0,hg,s],0.04,m,ladder); }
+        for(const h of [0.34,0.68,1.02]) box(ladder,0.1,0.025,0.44,m,-sp*(1-h/hg),h,0);
+        box(ladder,0.24,0.03,0.46,m,0,hg,0); }
+      g.add(ladder); both(ladder);
+      // 足元の資材
+      const stuff=new THREE.Group(); stuff.position.set(-1.0,H,0);
+      { const pg=new THREE.CylinderGeometry(0.024,0.024,1.5,8);
+        [[0,0.025,-0.12,0.3],[0.05,0.025,0.14,-0.2],[-0.1,0.074,0.0,0.05]].forEach(([x,y,z,ry])=>{ const p=new THREE.Mesh(pg,matPipe); p.rotation.set(0,ry,Math.PI/2); p.position.set(x,y,z); stuff.add(p); });
+        const bk=new THREE.Mesh(new THREE.CylinderGeometry(0.15,0.12,0.3,16),M(0x2f6fb0)); bk.position.set(0.5,0.15,0.28); stuff.add(bk);
+        const c1=new THREE.Mesh(new THREE.TorusGeometry(0.17,0.018,8,24),M(0x222222)); c1.rotation.x=Math.PI/2; c1.position.set(-0.45,0.02,-0.22); stuff.add(c1);
+        const c2=new THREE.Mesh(new THREE.TorusGeometry(0.12,0.015,8,24),M(0xf08a24)); c2.rotation.x=Math.PI/2; c2.position.set(-0.42,0.05,-0.2); stuff.add(c2);
+        bar([-0.3,0.012,-0.1],[0.75,0.012,0.35],0.02,M(0x222222),stuff);
+        const pw=box(stuff,0.9,0.015,0.4,M(0xc9a66b),-0.2,0.09,0.22); pw.rotation.set(0,0.4,0.08);
+        [[0.2,-0.3],[0.3,-0.25],[-0.6,0.3]].forEach(([x,z])=>{ const cl=box(stuff,0.08,0.06,0.1,M(0x60666d),x,0.03,z); cl.rotation.y=x*5; }); }
+      g.add(stuff); both(stuff);
+      // 作業員
+      const wb=makeWorker({lean:-0.3,hand:[0.18,1.0,-0.5],harness:true,lanyard:'floor',helmet:0xf5d000});
+      wb.position.set(8.0,H,-0.18); g.add(wb); both(wb);
+      const wo=makeWorker({harness:true,lanyard:'hooked',hookTo:[0.15,1.85,-0.61],wear:0x4a6b3a});
+      wo.position.set(-8.0,H,0.1); g.add(wo); both(wo);
+      [[3,-7,0.5,0x3b5b8c],[-5,-4,2.2,0x6b4a3a],[-8,-11,-0.7,0x3b5b8c]].forEach(([x,z,r,c])=>{ const w=makeWorker({wear:c}); w.position.set(x,0,z); w.rotation.y=r; g.add(w); });
+      const sign=new THREE.Mesh(new THREE.PlaneGeometry(0.8,0.4),new THREE.MeshLambertMaterial({map:TEX.label('安全第一\n指差し呼称でヨシ！',{size:52,border:'#15803d'})}));
+      sign.position.set(0,H+1.5,WALL_Z-0.01); sign.rotation.y=Math.PI; g.add(sign);
+    },
+    async experience(h){
+      const from=V(h.exp.from), to=V(h.exp.to), dir=to.clone().sub(from); dir.y=0;
+      if(effectOn){
+        sfx.whoosh();
+        const p0=rig.position.clone();
+        await tween(0.4,k=>{ rig.position.copy(p0).addScaledVector(dir,k*k); });
+        const p1=rig.position.clone(), dn=dir.clone().normalize();
+        await tween(1.1,k=>{ const t=k*1.1;
+          rig.position.set(p1.x+dn.x*0.6*t, p1.y-4.9*t*t, p1.z+dn.z*0.6*t);
+          setVignette(1,0.7*(1-k)); black.material.opacity=smooth(0.2,0.9,k); });
+      } else await fade(0,1,0.6);
+      black.material.opacity=1; sfx.thud(); hapticAll(1.0,250);
+    },
+  };
+})();
+
+// ---------------- ② 感電（室内・3部屋） ----------------
+// 分電盤：open=扉開放, inner='noelcb'|'live'|'off', elcb=漏電遮断器付ステッカー, tag/lock=通電禁止表示・施錠, wall=壁掛け（脚なし）
+function distBox(o={}){
+  const grp=new THREE.Group(), gray=M(0xc9ccd1), leg=M(0x6b7280);
+  const W=o.w||0.6, Hh=o.h||0.8, y=o.wall?0:1.0;
+  if(!o.wall){ bar([-W*0.36,0,0],[-W*0.36,y-Hh/2,0],0.05,leg,grp); bar([W*0.36,0,0],[W*0.36,y-Hh/2,0],0.05,leg,grp); }
+  box(grp,W,Hh,0.22,gray,0,y,0);
+  const doorTex=canvasTex(256,340,(c,w,h)=>{ c.fillStyle='#c9ccd1'; c.fillRect(0,0,w,h); c.textAlign='center';
+    c.fillStyle='#111'; c.font=`bold 36px ${FONT}`; c.fillText(o.label||'分電盤',w/2,60);
+    c.fillStyle='#facc15'; c.beginPath(); c.moveTo(w/2,90); c.lineTo(w/2+40,160); c.lineTo(w/2-40,160); c.closePath(); c.fill();
+    c.fillStyle='#111'; c.font=`bold 44px ${FONT}`; c.fillText('!',w/2,153); c.font=`bold 24px ${FONT}`; c.fillText('感電注意',w/2,192);
+    if(o.elcb){ c.fillStyle='#16a34a'; c.fillRect(38,215,180,60); c.fillStyle='#fff'; c.font=`bold 22px ${FONT}`; c.fillText('漏電遮断器付',w/2,242); c.fillText('点検済 ○',w/2,266); }
+    if(o.tag){ c.fillStyle='#dc2626'; c.fillRect(28,215,200,100); c.fillStyle='#fff'; c.font=`bold 34px ${FONT}`; c.fillText('通電禁止',w/2,258); c.font=`bold 22px ${FONT}`; c.fillText('作業中・投入禁止',w/2,296); } });
+  if(o.open){
+    const inTex=canvasTex(256,340,(c,w,h)=>{ c.fillStyle='#e5e7eb'; c.fillRect(0,0,w,h); c.textAlign='center';
+      c.fillStyle='#d97706'; for(const yy of [30,56,82]) c.fillRect(30,yy,196,14);
+      for(let i=0;i<4;i++){ c.fillStyle='#374151'; c.fillRect(28+i*52,120,42,72); c.fillStyle='#fff';
+        if(o.inner==='off'){ c.fillRect(40+i*52,165,18,22); c.fillStyle='#111'; c.font=`bold 16px ${FONT}`; c.fillText('OFF',49+i*52,210); }
+        else c.fillRect(40+i*52,128,18,22); }
+      if(o.inner==='noelcb'){ c.setLineDash([8,5]); c.strokeStyle='#ef4444'; c.lineWidth=4; c.strokeRect(30,225,196,70); c.setLineDash([]);
+        c.fillStyle='#ef4444'; c.font=`bold 22px ${FONT}`; c.fillText('漏電ブレーカ',w/2,252); c.fillText('外したまま',w/2,282); }
+      c.strokeStyle='#111'; c.lineWidth=5; for(let i=0;i<4;i++){ c.beginPath(); c.moveTo(49+i*52,192); c.lineTo(60+i*30,340); c.stroke(); } });
+    const inner=new THREE.Mesh(new THREE.PlaneGeometry(W-0.04,Hh-0.04),new THREE.MeshLambertMaterial({map:inTex})); inner.position.set(0,y,0.111); grp.add(inner);
+    const piv=new THREE.Group(); piv.position.set(-W/2,y,0.112); piv.rotation.y=-1.9; grp.add(piv);
+    box(piv,W,Hh,0.02,gray,W/2,0,0);
+    const f=new THREE.Mesh(new THREE.PlaneGeometry(W,Hh),new THREE.MeshLambertMaterial({map:doorTex})); f.position.set(W/2,0,0.011); piv.add(f);
+  } else {
+    const f=new THREE.Mesh(new THREE.PlaneGeometry(W,Hh),new THREE.MeshLambertMaterial({map:doorTex})); f.position.set(0,y,0.112); grp.add(f);
+  }
+  if(o.lock){ box(grp,0.05,0.06,0.025,M(0xeab308),W/2-0.06,y,0.13); const sh=new THREE.Mesh(new THREE.TorusGeometry(0.018,0.005,6,12,Math.PI),M(0x9ca3af)); sh.position.set(W/2-0.06,y+0.03,0.13); grp.add(sh); }
+  return grp;
+}
+const SC_KANDEN=(()=>{
+  const CH=2.8;
+  return {
+    id:'kanden', title:'感電', sky:0xb8d3ec, fog:[80,350],
+    start:[0,0,-0.8], panel:[0,1.55,-3.0], ambient:'room', timeLimit:120,
+    bounds:[-8.7,8.7,-4.7,-0.3],
+    blocks:[[-3.2,-2.8,-5.2,-3.1],[-3.2,-2.8,-1.9,0.2],[2.8,3.2,-5.2,-3.1],[2.8,3.2,-1.9,0.2],
+      [-7.6,-6.8,-5,-4.3],[-6.2,-5.4,-5,-4.3],[-9,-7.9,-2.7,-1.7],[-5.7,-4.3,-0.7,0],[-4.6,-3.6,-4.8,-3.8],[-7.1,-6.0,-1.5,-0.5],
+      [0.9,2.3,-5,-3.9],[-2.0,-1.2,-4.5,-3.5],[1.6,2.8,-1.2,-0.1],[-1.3,-0.4,-0.6,0],
+      [4.7,5.4,-2.9,-2.1],[5.7,6.3,-4.8,-4.0],[7.6,8.8,-1.5,-0.5],[7.7,8.8,-4.1,-3.1],[3.3,4.3,-0.6,0]],
+    introTitle:'感電　危険予知（KY）体験',
+    introLines:[
+      ['ここは内装工事中の建物の中です。電気室・作業室・水回りの3部屋があり、出入口を通って移動できます。','#fff'],
+      ['この現場には【感電につながる危険】が8か所あります。正しく対策されている物も混ざっています。分電盤・コード・機械・人の作業・窓の外にも注意してください。','#fde68a'],
+    ],
+    endTitle:'感電…', endBody:'電流が心臓を通ると、短い時間でも命に関わります。\n汗をかく夏場は、特に感電災害が多くなります。',
+    clearCall:'指差し呼称「電気の安全、ヨシ！」',
+    footer:'電気設備・電動工具は作業開始前に点検し（安衛則第352条）、異常があれば使わずに電気担当者へ連絡しましょう。',
+    hazards:[
+      { name:'濡れた手・濡れた床での電動工具の使用', short:'濡れた場所の電動工具', center:[5.0,0.9,-2.45], size:[1.5,1.9,1.4],
+        exp:{from:[5.0,0,-1.0], look:[5.0,0.6,-2.45], text:'濡れた手袋のまま、水たまりの中で電動工具のスイッチに触れた瞬間…'},
+        measure:'水たまりを除去・排水してから作業する。濡れた手袋で電動工具や差込プラグに触れない。湿潤した場所で使う電動工具は感電防止用漏電遮断器を通して接続し（安衛則第333条）、絶縁手袋・絶縁性の長靴を着用する。' },
+      { name:'被覆が破れた延長コード（キャプタイヤ）', short:'被覆の破れたコード', center:[-0.8,0.12,-2.1], size:[0.6,0.3,0.5],
+        exp:{from:[-0.8,0,-1.2], look:[-0.8,0,-2.1], text:'被覆の破れた部分を、素手でつかんで持ち上げた瞬間…'},
+        measure:'使用前にコード・プラグを点検し、被覆の損傷や老化があるものは使わず交換する（安衛則第336条）。テープの応急補修で済ませない。通路面に直接置かず、ケーブルハンガーで吊るかコードプロテクターで保護する（同第338条）。' },
+      { name:'漏電遮断器のない仮設分電盤（扉が開いたまま）', short:'漏電遮断器なしの分電盤', center:[-7.2,1.0,-4.6], size:[0.9,1.9,0.8],
+        exp:{from:[-7.2,0,-3.5], look:[-7.2,1.0,-4.7], text:'扉の開いた分電盤で、充電部に指が触れた瞬間…'},
+        measure:'仮設分電盤には感電防止用漏電遮断器（定格感度電流30mA以下の高速形）を設け、作業開始前に試験ボタンで動作を確認する（安衛則第333・352条）。扉は閉めて施錠し、充電部を露出させない（同第329条）。' },
+      { name:'たこ足配線（テーブルタップの連結）', short:'たこ足配線', center:[1.6,0.45,-4.25], size:[1.6,0.95,1.0],
+        exp:{from:[1.6,0,-2.9], look:[1.6,0.2,-4.1], text:'過熱して被覆が溶けたコードに触れた瞬間…'},
+        measure:'テーブルタップや延長コードを連結しない。差込口・コードの定格（例：15A・1500W）を超えて使わない。コードリールは巻いたまま使うと発熱するので全部引き出して使う。容量が足りない場合は分電盤から別回路を設ける。' },
+      { name:'架空電線への接近（窓の外へ長尺物）', short:'架空電線に接近', center:[6.0,2.75,-5.5], size:[1.4,5.6,2.8],
+        exp:{from:[6.3,0,-3.7], look:[6.0,5.2,-6.8], text:'窓の外へ出した長尺物が、架空電線に触れた瞬間…'},
+        measure:'架空電線の近くで長尺物・脚立・移動式クレーン等を扱うときは、電線の管理者（電力会社）と協議し、防護管の取付け・電線の移設・囲い等を行う。困難な場合は監視人を置く（安衛則第349条）。長尺物は電線側に向けず、寝かせて運ぶ。' },
+      { name:'アース（接地）が未接続の溶接機', short:'アース未接続', center:[8.3,0.45,-1.1], size:[1.3,1.0,1.2],
+        exp:{from:[6.8,0,-0.8], look:[8.2,0.5,-1.1], text:'漏電している溶接機の外箱に触れた瞬間…'},
+        measure:'金属製外箱の電気機械（溶接機・発電機・ポンプ等）は、接地線を分電盤や壁の接地端子に確実に接続し、漏電遮断器と併用する（漏電遮断器が使えない場合は接地が必須：安衛則第333条）。作業開始前に接地線の外れ・断線を点検する。' },
+      { name:'素手で動力盤の活線作業（絶縁用保護具なし）', short:'素手で活線作業', center:[-8.4,1.0,-2.2], size:[1.2,2.0,1.0],
+        exp:{from:[-7.3,0,-2.0], look:[-8.8,1.25,-2.2], text:'通電したままの盤の中で、ドライバーが充電部に触れた瞬間…'},
+        measure:'充電部の点検・修理は原則として停電して行う（安衛則第339条）。やむを得ず低圧の活線・活線近接作業をするときは、電気用ゴム手袋などの絶縁用保護具や活線作業用器具を使う（同第346・347条）。作業は有資格者が行い、低圧の電気取扱業務は特別教育を受けた者が行う（同第36条）。' },
+      { name:'停電作業中なのに開閉器に施錠・「通電禁止」表示がない', short:'通電禁止表示なし', center:[-2.82,1.5,-4.2], size:[0.4,0.85,0.75],
+        exp:{from:[-1.6,0,-2.8], look:[-2.95,1.5,-4.2], text:'照明の配線作業中、別の人がブレーカを入れてしまった瞬間…'},
+        measure:'停電作業では、開路した開閉器に施錠するか「通電禁止」の表示をし、監視人を置く等して誤って通電されないようにする（安衛則第339条）。作業前に検電器で停電を確認し、関係者全員に周知する。送電は全員の安全を確認してから行う。' },
+    ],
+    build(g){
+      // 屋外（窓の外）
+      const ground=new THREE.Mesh(new THREE.PlaneGeometry(400,400),new THREE.MeshLambertMaterial({map:TEX.ground()}));
+      ground.rotation.x=-Math.PI/2; ground.position.y=-0.01; g.add(ground); pick(ground);
+      addFarCity(g);
+      const poleM=M(0x9a9a9a), wireM=M(0x2b2b2b);
+      for(const x of [-2,14]){ const p=new THREE.Mesh(new THREE.CylinderGeometry(0.13,0.17,9,10),poleM); p.position.set(x,4.5,-7.2); g.add(p); pick(p); box(g,0.1,0.1,1.2,M(0x6b7280),x,6.2,-7.2); }
+      for(const [y,z] of [[6.25,-7.6],[6.25,-6.8],[5.5,-7.0],[5.5,-7.4]]){ const w=new THREE.Mesh(new THREE.CylinderGeometry(0.012,0.012,60,6),wireM); w.rotation.z=Math.PI/2; w.position.set(0,y,z); g.add(w); pick(w); }
+
+      // 床・天井・壁
+      const floor=new THREE.Mesh(new THREE.PlaneGeometry(18,5),new THREE.MeshLambertMaterial({map:TEX.concrete([9,3],'#a3a09a')}));
+      floor.rotation.x=-Math.PI/2; floor.position.set(0,0,-2.5); g.add(floor); both(floor);
+      const ceil=new THREE.Mesh(new THREE.PlaneGeometry(18,5),M(0xd6d3cc)); ceil.rotation.x=Math.PI/2; ceil.position.set(0,CH,-2.5); g.add(ceil); both(ceil);
+      const wm=new THREE.MeshLambertMaterial({map:TEX.concrete([3,1],'#b8b4ab')});
+      const wall=(w,h,d,x,y,z)=>{ const m=box(g,w,h,d,wm,x,y,z); both(m); return m; };
+      wall(18.24,CH,0.12,0,CH/2,0.06);                 // 手前
+      wall(12,CH,0.12,-3,CH/2,-5.06);                   // 奥（A・B）
+      wall(1.8,CH,0.12,3.9,CH/2,-5.06); wall(1.8,CH,0.12,8.1,CH/2,-5.06);   // 奥（C）開口の左右
+      wall(2.4,0.9,0.12,6.0,0.45,-5.06); wall(2.4,0.5,0.12,6.0,2.55,-5.06); // 開口の下・上
+      wall(0.12,CH,5,-9.06,CH/2,-2.5); wall(0.12,CH,5,9.06,CH/2,-2.5);
+      for(const x of [-3,3]){ wall(0.12,CH,1.9,x,CH/2,-4.05); wall(0.12,CH,1.9,x,CH/2,-0.95); wall(0.12,0.7,1.2,x,CH-0.35,-2.5); }
+      // 照明
+      for(const x of [-6,0,6]){ const pl=new THREE.PointLight(0xfff6e0,6,11,1.4); pl.position.set(x,CH-0.25,-2.5); g.add(pl);
+        box(g,1.2,0.05,0.2,new THREE.MeshBasicMaterial({color:0xfffbe8}),x,CH-0.03,-2.0); }
+      // 部屋名
+      for(const [t,x] of [['A 電気室',-6],['B 作業室',0],['C 水回り',6]]){ const s=new THREE.Mesh(new THREE.PlaneGeometry(0.9,0.25),new THREE.MeshLambertMaterial({map:TEX.label(t,{w:384,h:108,size:56,bg:'#1e3a5f',fg:'#fff'})})); s.position.set(x+(x===6?-2.2:0),2.12,-4.99); g.add(s); }
+
+      // 共通の小物
+      const add=(m,x,y,z,pk=true)=>{ m.position.set(x,y,z); g.add(m); if(pk) pick(m); return m; };
+      const drum=(x,z)=>add(P.cableDrum(),x,0,z);
+      const extinguisher=(x,z)=>add(P.extinguisher(),x,0,z);
+      const shelf=(x,z,items)=>add(P.shelf(items),x,0,z);
+      const cardboard=(p,x,y,z,w=0.4,h=0.3,d=0.3,label='電材')=>{ const b=P.cardboard(w,h,d,label); b.position.set(x,y+h/2,z); p.add(b); return b; };
+      const bucket=(x,z,c=0x2f6fb0,label='ペール缶')=>add(P.pail(hex(c),label),x,0,z);
+      const cone=(x,z)=>add(P.cone(),x,0,z);
+
+      /* ===== A 電気室 ===== */
+      const pA=distBox({open:true,inner:'noelcb',label:'仮設分電盤'}); add(pA,-7.2,0,-4.75);           // 危険：漏電遮断器なし
+      const pA2=distBox({elcb:true,label:'仮設分電盤'}); add(pA2,-5.8,0,-4.75);                         // 正しい例
+      { const live=distBox({wall:true,open:true,inner:'live',label:'動力盤',w:0.8,h:1.0}); live.rotation.y=Math.PI/2; add(live,-8.88,1.3,-2.2); // 危険：活線作業
+        const w=makeWorker({hand:[0.12,1.25,-0.5],wear:0x1e40af,helmet:0xffffff}); w.rotation.y=Math.PI/2; add(w,-8.25,0,-2.2);
+        box(w,0.02,0.02,0.18,M(0xfacc15),0.12,1.25,-0.6); }
+      shelf(-5.0,-0.35,s=>{ cardboard(s,-0.3,0.315,0,0.4,0.3,0.3,'ブレーカ'); cardboard(s,0.25,0.315,0,0.5,0.25,0.3,'端子台');
+        const gl=TEX.label('絶縁用保護具',{w:384,h:96,size:44,bg:'#fde68a'}); const lb=new THREE.Mesh(new THREE.PlaneGeometry(0.5,0.12),new THREE.MeshLambertMaterial({map:gl})); lb.position.set(0,1.1,-0.23); lb.rotation.y=Math.PI; s.add(lb);
+        for(const dx of [-0.25,0.0]){ box(s,0.12,0.22,0.05,M(0xf97316),dx,1.03,0); }
+        const hm=new THREE.Mesh(new THREE.SphereGeometry(0.14,14,8,0,Math.PI*2,0,Math.PI/2),M(0xffffff)); hm.position.set(0.35,0.915,0); s.add(hm);
+        cardboard(s,-0.2,1.515,0,0.5,0.2,0.35,'検電器'); });
+      drum(-4.1,-4.3); drum(-6.6,-1.0);
+      extinguisher(-3.45,-0.35);
+      { const tr=new THREE.Group(); box(tr,5.8,0.05,0.3,M(0x9ca3af),0,0,0); for(let i=0;i<4;i++) box(tr,5.8,0.03,0.03,M(i%2?0x111111:0x374151),0,0.03,-0.1+i*0.07); add(tr,-6,2.45,-4.8); }
+      { const mat=box(g,1.2,0.01,0.8,M(0x222222),-7.4,0.005,-2.2); pick(mat); }
+      cone(-4.0,-2.6);
+      add(P.toolbox(0xb91c1c),-5.5,0,-2.9);
+
+      /* ===== B 作業室 ===== */
+      // 危険：被覆の破れたコード（A→B へ床を横断）
+      const cordPts=[[-4.2,0.02,-2.6],[-3.0,0.02,-2.5],[-2.0,0.02,-2.3],[-1.3,0.02,-2.05],[-0.8,0.02,-2.1],[-0.2,0.02,-2.4],[0.6,0.02,-3.2],[0.95,0.02,-3.9]];
+      pick(cord(g,cordPts,0x2a2a2a,0.016));
+      { const dmg=new THREE.Group(); dmg.position.set(-0.8,0.02,-2.1); dmg.rotation.y=0.1; const cu=M(0xe07b2a,{emissive:0x5a2600});
+        bar([-0.07,0.012,0],[0.07,0.03,0.012],0.01,M(0xf5f5f5),dmg); bar([-0.07,0.008,0.004],[0.07,0.028,-0.018],0.01,M(0x111111),dmg); bar([-0.07,0.01,-0.004],[0.07,0.035,0.002],0.01,M(0xdc2626),dmg);
+        for(let i=0;i<9;i++){ const a=i/9*Math.PI*2; bar([0,0.03,0],[Math.cos(a)*0.06,0.03+Math.random()*0.04,Math.sin(a)*0.05],0.005,cu,dmg); }
+        g.add(dmg); pick(dmg); }
+      // 危険：たこ足配線（作業台の下）
+      { const tg=new THREE.Group(); g.add(tg); pick(tg);
+        box(tg,1.3,0.04,0.6,M(0x9a7b55),1.6,0.74,-4.55);
+        for(const [x,z] of [[1.0,-4.8],[2.2,-4.8],[1.0,-4.3],[2.2,-4.3]]) bar([x,0,z],[x,0.72,z],0.04,M(0x6b7280),tg);
+        const kettle=new THREE.Mesh(new THREE.CylinderGeometry(0.08,0.1,0.22,14),M(0xf3f4f6)); kettle.position.set(1.2,0.87,-4.55); tg.add(kettle);
+        box(tg,0.45,0.28,0.32,M(0xe5e7eb),1.75,0.9,-4.6); box(tg,0.12,0.04,0.08,M(0x111111),2.15,0.78,-4.4);
+        box(tg,0.4,0.5,0.2,M(0xe5e7eb),2.55,0.25,-4.55); box(tg,0.3,0.32,0.01,M(0xf97316,{emissive:0xc2410c}),2.55,0.27,-4.44);
+        const reel=new THREE.Mesh(new THREE.CylinderGeometry(0.17,0.17,0.14,18),M(0xf59e0b)); reel.rotation.x=Math.PI/2; reel.position.set(0.7,0.18,-4.5); tg.add(reel);
+        const wound=new THREE.Mesh(new THREE.TorusGeometry(0.12,0.04,8,20),M(0x111111)); wound.position.set(0.7,0.18,-4.5); tg.add(wound);
+        const white=M(0xf5f5f5), plugM=M(0x1f2937);
+        const strip=(cx,cz)=>{ box(tg,0.32,0.04,0.07,white,cx,0.02,cz); const plugs=[]; for(const dx of [-0.12,-0.04,0.04,0.12]){ box(tg,0.035,0.04,0.035,plugM,cx+dx,0.06,cz); plugs.push([cx+dx,0.08,cz]); } return {plugs,inp:[cx-0.18,0.02,cz]}; };
+        const A=strip(1.15,-4.0), B=strip(1.55,-3.9), C=strip(1.95,-4.05);
+        const link=(p,q)=>cord(tg,[p,[p[0],0.13,p[2]+0.04],[q[0],0.1,q[2]-0.03],q],0x111111,0.008);
+        link(A.plugs[3],B.inp); link(B.plugs[3],C.inp); link(A.plugs[0],[0.75,0.05,-4.4]);
+        cord(tg,[A.plugs[1],[1.2,0.4,-4.3],[1.2,0.78,-4.5]],0x111111,0.008); cord(tg,[B.plugs[1],[1.6,0.4,-4.3],[1.7,0.78,-4.45]],0x111111,0.008);
+        cord(tg,[C.plugs[1],[2.1,0.4,-4.3],[2.15,0.78,-4.4]],0x111111,0.008); cord(tg,[C.plugs[2],[2.3,0.1,-4.2],[2.5,0.05,-4.45]],0x111111,0.008);
+        const burn=new THREE.Mesh(new THREE.CircleGeometry(0.05,12),M(0x3f2a1a)); burn.rotation.x=-Math.PI/2; burn.position.set(1.55,0.041,-3.9); tg.add(burn); }
+      // 危険：停電作業中の電灯盤に表示・施錠なし ＋ 脚立で照明配線をする作業員
+      { const lp=distBox({wall:true,open:true,inner:'off',label:'電灯盤',w:0.45,h:0.6}); lp.rotation.y=Math.PI/2; add(lp,-2.88,1.5,-4.2);
+        const ld=new THREE.Group(); const lm=M(0xcdd2d9), hg=0.9, sp=0.3;
+        for(const s of [-0.2,0.2]){ bar([-sp,0,s],[0,hg,s],0.04,lm,ld); bar([sp,0,s],[0,hg,s],0.04,lm,ld); }
+        for(const h of [0.3,0.6]) box(ld,0.1,0.025,0.44,lm,-sp*(1-h/hg),h,0); box(ld,0.24,0.03,0.46,lm,0,hg,0);
+        add(ld,-1.6,0,-4.0);
+        const w=makeWorker({headUp:0.6,hand:[0.1,1.78,-0.12],wear:0x334155}); add(w,-1.6,0.92,-4.0);
+        const fix=box(g,0.6,0.08,0.15,M(0xe5e7eb),-1.6,CH-0.05,-4.15); pick(fix);
+        bar([-1.6,CH-0.08,-4.15],[-1.55,CH-0.3,-4.12],0.008,M(0xdc2626),g); bar([-1.62,CH-0.08,-4.15],[-1.66,CH-0.32,-4.1],0.008,M(0x111111),g); }
+      // 正しい例：ケーブルハンガーで吊った配線、コードプロテクター、ELB付きコードリール
+      { for(const x of [-2.4,-0.8,0.8,2.4]){ const hk=box(g,0.03,0.12,0.03,M(0x6b7280),x,2.3,-0.14); pick(hk); }
+        pick(cord(g,[[-2.4,2.24,-0.14],[-1.6,2.12,-0.14],[-0.8,2.24,-0.14],[0,2.12,-0.14],[0.8,2.24,-0.14],[1.6,2.12,-0.14],[2.4,2.24,-0.14]],0x2a2a2a,0.014));
+        const prot=box(g,1.4,0.04,0.14,M(0xfacc15),3.0,0.02,-2.55); pick(prot);
+        pick(cord(g,[[2.1,0.02,-2.55],[2.3,0.02,-2.55]],0x2a2a2a,0.014)); pick(cord(g,[[3.7,0.02,-2.55],[4.2,0.02,-2.4]],0x2a2a2a,0.014));
+        const reel=new THREE.Mesh(new THREE.CylinderGeometry(0.2,0.2,0.16,18),M(0x2563eb)); reel.rotation.x=Math.PI/2; add(reel,2.0,0.22,-2.5);
+        const rl=new THREE.Mesh(new THREE.PlaneGeometry(0.28,0.1),new THREE.MeshLambertMaterial({map:TEX.label('漏電遮断器付',{w:256,h:90,size:36,bg:'#16a34a',fg:'#fff'})})); rl.position.set(2.0,0.22,-2.41); g.add(rl); }
+      // 作業室の資材など
+      { const gb=P.gypsum(8); gb.rotation.y=Math.PI/2; add(gb,2.2,0,-0.65); }
+      { const cart=P.cart(); const cb=P.cardboard(0.5,0.35,0.4,'照明器具'); cb.position.set(-0.15,0.42,0); cart.add(cb); add(cart,-0.85,0,-0.35); }
+      add(P.toolbox(0x1d4ed8),-2.2,0,-1.3);
+      bucket(0.4,-1.6,0x9ca3af,'ビス'); cone(-2.4,-3.4);
+      { const l=P.ladder(2.3); l.rotation.x=-0.06; add(l,2.8,0,-4.85); }
+
+      { const cb=new THREE.Group(); for(let i=0;i<2;i++){ const c=P.cardboard(0.5,0.3,0.4,i?'スイッチ':'コンセント'); c.position.set(0,0.15+i*0.3,0); cb.add(c); } add(cb,-2.5,0,-4.5); }
+      add(P.trash(),2.6,0,-1.9);
+      /* ===== C 水回り ===== */
+      // 危険：濡れた床で電動工具
+      { const wg=new THREE.Group(); g.add(wg); pick(wg);
+        const pm=new THREE.MeshPhongMaterial({color:0x4d6f94,transparent:true,opacity:0.75,shininess:120,specular:0xffffff});
+        const pud=new THREE.Mesh(new THREE.CircleGeometry(1,32),pm); pud.scale.set(1.1,0.75,1); pud.rotation.x=-Math.PI/2; pud.position.set(5.0,0.012,-2.45); wg.add(pud);
+        const w=makeWorker({hand:[0.12,1.0,-0.42],wear:0x6b4a3a,lean:-0.15}); w.position.set(5.0,0,-2.55); w.rotation.y=0.6; wg.add(w);
+        box(w,0.32,0.09,0.09,M(0x15803d),0,1.0,-0.5);
+        w.updateMatrixWorld(true); const tw=w.localToWorld(V([-0.16,1.0,-0.5]));
+        cord(wg,[tw,[tw.x-0.1,0.5,tw.z+0.1],[4.6,0.02,-2.2],[4.3,0.02,-2.4],[4.2,0.02,-2.4]],0x1f1f1f,0.01);
+        const bk=new THREE.Mesh(new THREE.CylinderGeometry(0.15,0.12,0.3,16),M(0x2f6fb0)); bk.rotation.z=Math.PI/2; bk.position.set(5.6,0.13,-2.0); wg.add(bk);
+        box(wg,0.12,0.15,0.08,M(0x9ca3af),8.95,0.8,-2.6);
+        cord(wg,[[8.9,0.75,-2.6],[8.5,0.1,-2.5],[7.5,0.02,-2.3],[6.2,0.02,-2.4],[5.9,0.02,-2.3]],0x16a34a,0.02); }
+      // 危険：窓の外へ長尺物（架空電線）
+      { const w=makeWorker({hand:[0.1,1.15,-0.3],wear:0x3b5b8c}); add(w,6.0,0,-4.35);
+        pick(bar([6.0,1.05,-4.6],[6.0,5.35,-6.85],0.06,M(0xd1d5db),g)); }
+      // 危険：アース未接続の溶接機 ／ 正しい例：アース接続済みのポンプ
+      { const eg=new THREE.Group(); g.add(eg); pick(eg);
+        box(eg,0.8,0.6,0.5,M(0x1d4ed8),8.2,0.42,-1.0);
+        const lab=new THREE.Mesh(new THREE.PlaneGeometry(0.4,0.15),new THREE.MeshLambertMaterial({map:TEX.label('溶接機',{w:256,h:96,size:54,bg:'#e5e7eb'})})); lab.position.set(7.79,0.55,-1.0); lab.rotation.y=-Math.PI/2; eg.add(lab);
+        box(eg,0.05,0.06,0.06,M(0xfacc15),8.2,0.25,-0.74);
+        cord(eg,[[8.2,0.25,-0.72],[8.1,0.1,-0.6],[7.9,0.02,-0.55],[7.6,0.02,-0.7]],0x16a34a,0.01); box(eg,0.05,0.03,0.08,M(0x9ca3af),7.57,0.02,-0.72);
+        const term=distBox({wall:true,label:'接地端子',w:0.22,h:0.22}); term.rotation.y=-Math.PI/2; term.position.set(8.92,0.5,-1.6); eg.add(term);
+        cord(eg,[[7.9,0.5,-1.25],[7.6,0.1,-1.5],[7.2,0.02,-1.8],[6.8,0.02,-2.0]],0x111111,0.014); }
+      { const cg=new THREE.Group(); g.add(cg); pick(cg);
+        const pump=new THREE.Mesh(new THREE.CylinderGeometry(0.2,0.22,0.55,16),M(0x0f766e)); pump.position.set(8.2,0.28,-3.6); cg.add(pump);
+        const lab=new THREE.Mesh(new THREE.PlaneGeometry(0.3,0.1),new THREE.MeshLambertMaterial({map:TEX.label('アース接続済',{w:256,h:84,size:34,bg:'#16a34a',fg:'#fff'})})); lab.position.set(7.98,0.35,-3.6); lab.rotation.y=-Math.PI/2; cg.add(lab);
+        const term=distBox({wall:true,label:'接地端子',w:0.22,h:0.22}); term.rotation.y=-Math.PI/2; term.position.set(8.92,0.5,-4.1); cg.add(term);
+        cord(cg,[[8.4,0.3,-3.7],[8.7,0.2,-3.9],[8.85,0.45,-4.05],[8.82,0.5,-4.1]],0x16a34a,0.01); }
+      // 正しい例：通電禁止の表示＋施錠された電灯盤
+      { const ok=distBox({wall:true,tag:true,lock:true,label:'電灯盤',w:0.45,h:0.6}); ok.rotation.y=Math.PI/2; add(ok,3.12,1.5,-4.2); }
+      { const mat=box(g,1.0,0.015,0.7,M(0x1f2937),3.8,0.008,-1.2); pick(mat); }
+      cone(4.6,-0.6); cone(7.0,-3.0); bucket(3.8,-0.3,0xf59e0b); bucket(4.1,-0.3,0x2f6fb0);
+      { const fan=new THREE.Group(); const r=new THREE.Mesh(new THREE.TorusGeometry(0.25,0.025,8,22),M(0x1f2937)); fan.add(r); bar([0,-0.25,0],[0,-0.7,0],0.04,M(0x1f2937),fan); add(fan,3.6,0.7,-3.6); }
+    },
+    async experience(h){
+      if(effectOn){
+        sfx.zap(); hapticAll(0.45,300);
+        await tween(0.4,k=>{ setVignette(1,0.8*(1-k),0x5a0000); black.material.opacity=smooth(0.35,1,k); });
+      } else await fade(0,1,0.6);
+      black.material.opacity=1;
+    },
+  };
+})();
+
+// ---------------- ③ モルタル飛散（目）（室内・3部屋） ----------------
+const SC_MORTAR=(()=>{
+  const CH=2.7;
+  const PART=[[-3.2,-2.8,-5.2,-3.1],[-3.2,-2.8,-1.9,0.2],[2.8,3.2,-5.2,-3.1],[2.8,3.2,-1.9,0.2]];
+  return {
+    id:'mortar', title:'モルタル飛散（目）', sky:0xb8d3ec, fog:[80,350],
+    start:[0,0,-0.8], panel:[0,1.55,-3.0], ambient:'room', timeLimit:110,
+    bounds:[-8.7,8.7,-4.7,-0.3],
+    blocks:[...PART,[-8.9,-6.3,-3.7,-2.3],[-5.9,-4.6,-4.7,-3.8],[-8.9,-7.7,-5,-3.8],[-7.2,-6.0,-5,-3.8],[-4.3,-3.7,-4.9,-4.3],[-8.9,-7.7,-1.4,-0.2],[-6.9,-5.2,-1.3,-0.5],[-4.9,-3.9,-1.6,-0.8],
+      [-1.9,-0.5,-4.3,-3.3],[1.9,2.9,-4.4,-3.6],[-2.7,-2.0,-1.3,-0.5],[-0.2,0.8,-4.7,-3.9],[1.3,2.5,-1.6,-0.4],
+      [7.9,9,-3.8,-3.0],[6.9,7.5,-4.8,-4.0],[3.4,4.8,-4.8,-3.8],[5.8,6.4,-0.9,0],[3.5,4.1,-1.3,-0.7]],
+    introTitle:'モルタル飛散（目）　危険予知（KY）体験',
+    introLines:[
+      ['ここは内装工事中の建物です。A 材料・練り場、B 左官作業室、C はつり・補修室の3部屋があり、出入口を通って移動できます。','#fff'],
+      ['この現場には【目にモルタル・粉じん・破片が入る危険】が6か所あります。人の顔の向きや保護具、置いてある（置いていない）設備にも注目してください。','#fde68a'],
+    ],
+    endTitle:'目に入った…', endBody:'セメント・モルタルは強いアルカリ性で、失明のおそれもあります。\n目に入ったら、こすらずにすぐ大量の流水で15分以上洗い、眼科を受診してください。',
+    clearCall:'指差し呼称「保護メガネ、ヨシ！」',
+    footer:'目に入ったら、こすらず、すぐに大量の流水で15分以上洗い、眼科を受診する。洗眼用の水の場所を全員で確認しておきましょう。',
+    hazards:[
+      { name:'保護メガネをしていない（額に上げている）', short:'保護メガネを額に', center:[2.3,1.0,-4.0], size:[1.2,2.0,1.2],
+        exp:{from:[1.2,0,-3.0], look:[2.94,1.4,-4.0], text:'メガネを額に上げたまま、こてを振った瞬間…'},
+        measure:'保護メガネ（すき間の少ないゴーグル形が望ましい）を目に正しく着用し、額やヘルメットに上げたままにしない。モルタル・セメントは強いアルカリ性で、目に入ると角膜を傷めるおそれがある（保護具の備付け：安衛則第593・594条）。' },
+      { name:'顔の真上の天井を見上げて塗っている', short:'真上を見上げて塗る', center:[-1.2,1.7,-3.8], size:[1.5,3.4,1.3],
+        exp:{from:[-1.2,0,-2.5], look:[-1.2,2.7,-3.6], text:'顔の真上を塗っていたら、モルタルが垂れて…'},
+        measure:'顔の真上を塗らず、作業台を移動して体を少しずらし、斜め下から塗る。こて板の材料は少量ずつ取る。天井作業はゴーグルを着用し、帽子・タオル等で顔まわりを守る。' },
+      { name:'ミキサーで練るときに顔を近づけている', short:'練り混ぜで顔を近づける', center:[-5.25,0.7,-4.25], size:[1.4,1.5,1.0],
+        exp:{from:[-5.2,0,-3.3], look:[-5.0,0.2,-4.25], text:'のぞき込んだまま、かくはん機の回転を上げた瞬間…'},
+        measure:'練り混ぜ中は容器をのぞき込まず、顔を離す。かくはん機は低速から回し始め、羽根を容器から出す前に必ず停止する。容器は安定した場所に置いて固定し、ゴーグル・防じんマスクを着用する。' },
+      { name:'すぐ近くで、はつり作業をしている', short:'近くのはつり作業', center:[7.9,0.95,-3.8], size:[2.2,1.9,1.7],
+        exp:{from:[7.0,0,-2.5], look:[9.0,1.1,-3.4], text:'はつりのすぐ横で作業していたら、破片が飛んできて…'},
+        measure:'はつり作業の近くで別の作業をしない。作業場所を区画し、養生シート等で仕切って飛散範囲に立ち入らない。はつり作業者・周囲の作業者とも保護メガネ（ゴーグル）を着用する。作業の順番を調整する。' },
+      { name:'洗眼用の水（洗眼ボトル）が置いていない', short:'洗眼用の水がない', center:[5.0,1.2,-0.25], size:[0.9,1.1,0.5],
+        exp:{from:[5.0,0,-1.4], look:[5.0,1.3,0], text:'目に入ったのに、すぐ洗える水が近くにない…'},
+        measure:'作業場所の近くに洗眼用の水（洗眼ボトル・水を入れたポリタンク等）を備え、場所を全員に周知する（救急用具の備付け：安衛則第633条）。目に入ったらこすらず、すぐに大量の流水で15分以上洗い、眼科を受診する。' },
+      { name:'風下で材料（セメント）を投入している', short:'風下で材料投入', center:[-7.6,0.95,-3.0], size:[2.4,1.9,1.5],
+        exp:{from:[-6.4,0,-2.2], look:[-7.6,1.0,-3.0], text:'風下で袋を開けた瞬間、粉が顔に…'},
+        measure:'材料は風上側に立って、低い位置から静かに投入する。送風機や窓からの風向きを確認し、粉じんが顔に向かわない位置で作業する。ゴーグル・防じんマスクを着用する。' },
+    ],
+    build(g){
+      buildShell(g,{CH,names:['A 材料・練り場','B 左官作業室','C はつり・補修室'],left:{z0:-3.7,z1:-2.3,y0:0.9,y1:2.1},floor:'#9e9b94',wall:'#b3afa6',signDx:[1.2,1.6,-1.6]});
+      const add=(m,x,y,z,ry=0)=>{ m.position.set(x,y,z); m.rotation.y=ry; g.add(m); pick(m); return m; };
+      const wallSign=(t,x,y,z,ry,o)=>{ const s=P.sign(t,o); s.position.set(x,y,z); s.rotation.y=ry; g.add(s); return s; };
+      const patch=(w,h,x,y,z,ry)=>{ const p=new THREE.Mesh(new THREE.PlaneGeometry(w,h),M(0x8c877c)); p.position.set(x,y,z); p.rotation.y=ry; g.add(p); };
+
+      /* ===== A 材料・練り場 ===== */
+      // 危険：窓からの風の風下で材料投入（窓→送風機→ミキサー→作業員）
+      { const mg=new THREE.Group(); g.add(mg); pick(mg);
+        const drum=new THREE.Mesh(new THREE.CylinderGeometry(0.38,0.3,0.7,18,1,true),new THREE.MeshLambertMaterial({color:0xea580c,side:THREE.DoubleSide})); drum.position.set(-7.6,0.85,-3.0); drum.rotation.z=-0.45; mg.add(drum);
+        bar([-7.9,0,-3.3],[-7.7,0.6,-3.0],0.05,M(0x374151),mg); bar([-7.3,0,-3.3],[-7.6,0.6,-3.0],0.05,M(0x374151),mg); bar([-7.6,0,-2.7],[-7.6,0.6,-3.0],0.05,M(0x374151),mg);
+        const ml=P.sign('モルタルミキサー',{w:0.5,h:0.12,bg:'#fff',fg:'#111'}); ml.position.set(-7.6,0.45,-2.84); mg.add(ml);
+        const fan=P.fan(); fan.position.set(-8.55,0.8,-3.0); mg.add(fan);
+        const w=makeWorker({hand:[0.18,1.15,-0.4],wear:0x7c2d12,lean:-0.2}); w.position.set(-6.75,0,-3.0); w.rotation.y=Math.PI/2; mg.add(w);
+        const bag=P.bag('cement'); bag.scale.set(0.85,1,0.7); bag.rotation.x=0.4; bag.position.set(0,1.15,-0.45); w.add(bag);
+        const dustM=new THREE.MeshLambertMaterial({color:0xe7e5e4,transparent:true,opacity:0.32,depthWrite:false});
+        for(const [x,y,s] of [[-7.3,1.2,0.3],[-7.05,1.4,0.28],[-6.88,1.55,0.24]]){ const d=new THREE.Mesh(new THREE.SphereGeometry(s,12,8),dustM); d.position.set(x,y,-3.0); mg.add(d); }
+        const windM=new THREE.MeshBasicMaterial({color:0xffffff,transparent:true,opacity:0.5});
+        for(const [y,z] of [[1.0,-2.8],[1.3,-3.1],[0.7,-3.2],[1.6,-2.9]]) box(mg,0.7,0.01,0.01,windM,-8.1,y,z);
+      }
+      // 危険：かくはん機でのぞき込む
+      { const m=new THREE.Group(); g.add(m); pick(m);
+        const pail=P.pail('#6b7280','モルタル'); pail.position.set(-5.0,0,-4.25); m.add(pail);
+        const mort=new THREE.Mesh(new THREE.CircleGeometry(0.14,18),M(0x8f8a80)); mort.rotation.x=-Math.PI/2; mort.position.set(-5.0,0.341,-4.25); m.add(mort);
+        const w=makeWorker({lean:-0.85,hand:[0.1,0.75,-0.45],wear:0x6b4a3a}); w.position.set(-5.5,0,-4.25); w.rotation.y=-Math.PI/2; m.add(w);
+        w.updateMatrixWorld(true); const top=w.localToWorld(V([0,0.78,-0.48]));
+        bar([top.x,top.y,top.z],[-5.0,0.25,-4.25],0.025,M(0x9ca3af),m);
+        box(m,0.12,0.22,0.12,M(0x15803d),top.x,top.y+0.1,top.z);
+        const sm=M(0x8f8a80); for(let i=0;i<10;i++){ const a=Math.random()*Math.PI*2, r=0.22+Math.random()*0.35; const d=new THREE.Mesh(new THREE.SphereGeometry(0.015+Math.random()*0.015,6,5),sm); d.position.set(-5.0+Math.cos(a)*r,0.005,-4.25+Math.sin(a)*r); d.scale.y=0.3; m.add(d); }
+        for(let i=0;i<5;i++){ const d=new THREE.Mesh(new THREE.SphereGeometry(0.012,6,5),sm); d.position.set(-5.0+(Math.random()-0.5)*0.3,0.45+Math.random()*0.3,-4.25+(Math.random()-0.5)*0.3); m.add(d); } }
+      // 資材
+      add(P.bagStack('cement',3),-8.3,0,-4.4); add(P.bagStack('mortar',2),-6.6,0,-4.4);
+      add(P.polytank('練り混ぜ用水'),-4.0,0,-4.6); add(P.bagStack('sand',2),-8.3,0,-0.8);
+      add(P.wheelbarrow(),-6.0,0,-0.9,0.3); add(P.tub(),-4.4,0,-1.2); add(P.pail('#f59e0b','混和剤'),-4.9,0,-2.0);
+      wallSign('防じんマスク・保護メガネ着用',-6.0,1.75,-0.01,Math.PI,{bg:'#1d4ed8',w:1.4,h:0.3});
+
+      /* ===== B 左官作業室 ===== */
+      // 危険：保護メガネを額に上げて壁を塗る
+      { const w=makeWorker({glasses:'up',hand:[0.12,1.35,-0.6],wear:0x64748b}); add(w,2.3,0,-4.0,-Math.PI/2);
+        box(w,0.28,0.01,0.11,M(0x9ca3af),0.1,1.35,-0.68); box(w,0.25,0.01,0.25,M(0x7c5a3a),-0.15,1.25,-0.55);
+        patch(1.8,1.4,2.93,1.2,-4.0,-Math.PI/2); }
+      // 危険：可搬式作業台の上で真上を見上げて天井を塗る
+      { const p=new THREE.Group(); g.add(p); pick(p);
+        const plat=pbox(1.3,0.06,0.7,{top:ptex('plat',256,128,(c,W,H)=>{ c.fillStyle='#cdd2d9'; c.fillRect(0,0,W,H); c.strokeStyle='#9ca3af'; for(let x=0;x<W;x+=16){ c.beginPath(); c.moveTo(x,0); c.lineTo(x,H); c.stroke(); } txt(c,'可搬式作業台',W/2,H/2,26,'#1f2937'); }),side:0xcdd2d9});
+        plat.position.set(-1.2,0.9,-3.8); p.add(plat);
+        for(const [x,z] of [[-1.8,-4.1],[-0.6,-4.1],[-1.8,-3.5],[-0.6,-3.5]]) bar([x,0,z],[x,0.88,z],0.04,M(0xcdd2d9),p);
+        bar([-1.8,0.9,-3.47],[-0.6,0.9,-3.47],0.03,M(0xf59e0b),p);
+        const w=makeWorker({headUp:1.0,hand:[0.08,1.72,-0.05],wear:0x3b5b8c}); w.position.set(-1.2,0.93,-3.8); p.add(w);
+        box(p,0.28,0.012,0.11,M(0x9ca3af),-1.2,CH-0.02,-3.82);
+        const wet=new THREE.Mesh(new THREE.PlaneGeometry(1.2,0.9),M(0x8f8a80)); wet.rotation.x=Math.PI/2; wet.position.set(-1.0,CH-0.004,-3.9); p.add(wet);
+        const dm=M(0x8f8a80); for(const [x,y,z,r] of [[-1.18,2.35,-3.78,0.025],[-1.22,2.1,-3.8,0.02],[-1.15,1.75,-3.75,0.018]]){ const d=new THREE.Mesh(new THREE.SphereGeometry(r,8,6),dm); d.position.set(x,y,z); p.add(d); } }
+      // 正しい例：ゴーグルを着けて壁を塗る作業員
+      { const w=makeWorker({glasses:'on',hand:[0.12,1.2,-0.55],wear:0x4a6b3a}); add(w,-2.3,0,-0.9,Math.PI/2);
+        box(w,0.28,0.01,0.11,M(0x9ca3af),0.1,1.2,-0.63); patch(1.4,1.2,-2.93,1.1,-0.9,Math.PI/2); }
+      // 資材
+      add(P.tub(),0.3,0,-4.3); add(P.pail('#6b7280','モルタル'),1.2,0,-4.6); add(P.bagStack('plaster',2),1.9,0,-1.0);
+      { const pl=P.plywood(); pl.rotation.x=-0.12; pl.position.set(1.0,0.9,-4.85); g.add(pl); pick(pl); }
+      { const hawk=box(g,0.3,0.01,0.3,M(0x7c5a3a),0.9,0.005,-1.8); pick(hawk); box(g,0.28,0.01,0.11,M(0x9ca3af),1.1,0.012,-1.7); }
+      wallSign('保護メガネ着用',-1.4,1.8,-0.01,Math.PI,{bg:'#1d4ed8',w:0.9,h:0.3});
+
+      /* ===== C はつり・補修室 ===== */
+      // 危険：はつり作業のすぐ横で塗り作業
+      { const hg=new THREE.Group(); g.add(hg); pick(hg);
+        const w=makeWorker({glasses:'on',hand:[0.12,1.2,-0.45],wear:0x334155}); w.position.set(8.25,0,-3.4); w.rotation.y=-Math.PI/2; hg.add(w);
+        box(w,0.1,0.12,0.5,M(0xdc2626),0,1.2,-0.62); bar([0,1.2,-0.86],[0,1.2,-0.98],0.02,M(0x9ca3af),w);
+        const hl=P.sign('ハンマドリル',{w:0.2,h:0.06,bg:'#fff',fg:'#111'}); hl.position.set(0.06,1.2,-0.62); hl.rotation.y=Math.PI/2; w.add(hl);
+        const rubM=M(0x9e9b94);
+        for(let i=0;i<25;i++){ const r=box(hg,0.03+Math.random()*0.06,0.02+Math.random()*0.04,0.03+Math.random()*0.05,rubM,8.4+Math.random()*0.55,0.02,-3.9+Math.random()*1.0); r.rotation.y=Math.random()*3; }
+        for(let i=0;i<10;i++){ const t=Math.random(); const r=box(hg,0.025,0.025,0.025,rubM,8.85-t*1.4,1.1+t*0.4+Math.random()*0.1,-3.4-t*0.8); r.rotation.set(Math.random()*3,Math.random()*3,0); }
+        const dust=new THREE.Mesh(new THREE.SphereGeometry(0.5,14,10),new THREE.MeshLambertMaterial({color:0xd6d3cc,transparent:true,opacity:0.35,depthWrite:false})); dust.position.set(8.75,1.2,-3.4); dust.scale.set(0.7,0.9,1.4); hg.add(dust);
+        const dmg=new THREE.Mesh(new THREE.PlaneGeometry(0.5,0.4),M(0x6b6a66)); dmg.position.set(8.99,1.2,-3.4); dmg.rotation.y=-Math.PI/2; hg.add(dmg);
+        const w2=makeWorker({glasses:'on',hand:[0.12,1.2,-0.5],wear:0x6b4a3a}); w2.position.set(7.2,0,-4.3); hg.add(w2);
+        const pt=new THREE.Mesh(new THREE.PlaneGeometry(0.8,0.6),M(0x8c877c)); pt.position.set(7.2,1.2,-4.99); hg.add(pt); }
+      // 危険：洗眼場所の表示だけで、水が置いていない
+      { const s=new THREE.Group(); g.add(s); pick(s);
+        const sign=new THREE.Mesh(new THREE.PlaneGeometry(0.45,0.3),TM(canvasTex(300,200,(c,w,h)=>{ c.fillStyle='#15803d'; c.fillRect(0,0,w,h);
+          c.fillStyle='#fff'; c.fillRect(30,70,60,20); c.fillRect(50,50,20,60); txt(c,'洗眼',170,70,44,'#fff'); txt(c,'用 水',170,120,30,'#fff'); txt(c,'ここに置く',170,170,20,'#fff',false); })));
+        sign.position.set(5.0,1.6,-0.01); sign.rotation.y=Math.PI; s.add(sign);
+        box(s,0.5,0.03,0.3,M(0xd1d5db),5.0,1.1,-0.15);
+        bar([4.8,1.0,-0.01],[4.8,1.09,-0.28],0.025,M(0x9ca3af),s); bar([5.2,1.0,-0.01],[5.2,1.09,-0.28],0.025,M(0x9ca3af),s); }
+      // 資材
+      { const sb=new THREE.Group(); for(let i=0;i<3;i++){ const b=P.sandbag('ガラ'); b.position.set(i%2*0.1,0.1+i*0.2,0); b.rotation.y=i*0.2; sb.add(b); } add(sb,6.1,0,-0.45); }
+      add(P.wheelbarrow(),4.1,0,-4.3,-0.4); add(P.reel(false,true),3.8,0,-1.0); add(P.toolbox(0xc62828),4.6,0,-2.7);
+      add(P.cone(),6.3,0,-2.2); add(P.cone(),5.6,0,-3.5);
+      wallSign('粉じん注意',5.0,1.8,-4.99,0,{bg:'#facc15',fg:'#111',w:0.8,h:0.26});
+    },
+    async experience(h){
+      if(effectOn){
+        sfx.splat(); hapticAll(0.3,120);
+        drawSplat(); splat.visible=true;
+        await tween(0.25,k=>{ splat.material.opacity=k; });
+        await tween(0.6,k=>{ whiteOv.material.opacity=0.8*k; });
+        await tween(0.5,k=>{ black.material.opacity=k; });
+      } else await fade(0,1,0.6);
+      black.material.opacity=1; splat.visible=false; splat.material.opacity=0; whiteOv.material.opacity=0;
+    },
+  };
+})();
+
+// ---------------- ④ サンダー（ディスクグラインダー）（室内・3部屋） ----------------
+// サンダー本体：本体は+X方向、といしは軸Y（下向き）。userData.disc で回転させる
+function makeGrinder(withGuard=true,withHandle=true){
+  const g=new THREE.Group();
+  const body=new THREE.Mesh(new THREE.CylinderGeometry(0.034,0.04,0.26,12),M(0x15803d)); body.rotation.z=Math.PI/2; body.position.x=-0.15; g.add(body);
+  box(g,0.03,0.05,0.05,M(0x111111),-0.29,0,0);
+  box(g,0.07,0.06,0.07,M(0x374151),0,0,0);
+  const disc=new THREE.Mesh(new THREE.CylinderGeometry(0.0625,0.0625,0.005,24),M(0x7b8088)); disc.position.set(0,-0.05,0); g.add(disc);
+  box(disc,0.09,0.006,0.012,M(0x2b2b2b),0,0,0);
+  if(withGuard){ const gd=new THREE.Mesh(new THREE.CylinderGeometry(0.07,0.07,0.025,20,1,true,Math.PI*0.5,Math.PI),new THREE.MeshLambertMaterial({color:0x9ca3af,side:THREE.DoubleSide})); gd.position.set(0,-0.045,0); g.add(gd); }
+  if(withHandle){ const hd=new THREE.Mesh(new THREE.CylinderGeometry(0.014,0.014,0.13,8),M(0x111111)); hd.rotation.x=Math.PI/2; hd.position.set(0,0,0.09); g.add(hd); }
+  g.userData.disc=disc; return g;
+}
+// 軍手（白地に滑り止めの点）
+function gunteMat(){
+  return new THREE.MeshLambertMaterial({map:canvasTex(64,64,(c,w,h)=>{ c.fillStyle='#f4f2ea'; c.fillRect(0,0,w,h); c.fillStyle='#9ca3af';
+    for(let x=4;x<w;x+=10) for(let y=4;y<h;y+=10){ c.beginPath(); c.arc(x+(y%20?5:0),y,2,0,7); c.fill(); } })});
+}
+const SC_GRINDER=(()=>{
+  const PART=[[-3.2,-2.8,-5.2,-3.1],[-3.2,-2.8,-1.9,0.2],[2.8,3.2,-5.2,-3.1],[2.8,3.2,-1.9,0.2]];
+  return {
+    id:'grinder', title:'サンダー（グラインダー）', sky:0xb8d3ec, fog:[80,350],
+    start:[0,0,-0.8], panel:[0,1.55,-3.0], ambient:'site', timeLimit:110,
+    bounds:[-8.7,8.7,-4.7,-0.3],
+    blocks:[...PART,[-6.9,-5.5,-4.0,-3.2],[-4.5,-3.2,-4.8,-3.6],[-8.9,-7.7,-4.9,-3.7],[-8.9,-7.7,-1.6,-0.4],[-7.4,-6.6,-1.0,-0.3],
+      [0.3,1.3,-4.5,-3.1],[2.0,2.8,-1.4,-0.6],[1.5,2.1,-2.1,-1.5],[-2.7,-2.1,-1.5,-0.9],
+      [5.3,6.7,-4.9,-3.5],[7.1,8.1,-2.1,-0.9],[8.1,8.9,-4.4,-3.0],[3.4,5.6,-4.9,-4.1],[3.7,4.7,-1.4,-0.6]],
+    introTitle:'サンダー（ディスクグラインダー）　KY・ヒヤリ体験',
+    introLines:[
+      ['ここは室内の加工場です。A ブロック加工、B タイル加工、C 金物加工の3部屋があり、出入口を通って移動できます。','#fff'],
+      ['この現場には【サンダー作業の危険】が6か所あります。持ち方・下敷き・保護具・手袋・足元（コードや水気）に注目してください。','#fde68a'],
+    ],
+    endTitle:'ヒヤリ！', endBody:'サンダーは、刃が噛む・巻き込む・コードを切るなど、\n一瞬のヒヤリが大けがや感電につながります。',
+    clearCall:'指差し呼称「サンダー作業、ヨシ！」',
+    footer:'作業前に「両手保持・加工物の固定・硬い下敷き・保護メガネ・カバー・手袋（軍手は不可）・足元のコードと水気」を指差し確認しましょう。といしの取替え・試運転は特別教育を受けた人が行います。',
+    hazards:[
+      { name:'ブロック切断：片手持ち・加工物が固定されていない（キックバック）', short:'キックバックの危険', center:[-6.3,0.75,-3.6], size:[1.7,1.6,1.1],
+        exp:{fx:'kick', from:[-6.0,0,-2.7], look:[-6.0,0.6,-3.6], text:'ブロックを切っている途中、切り込みが閉じて刃が噛んだ瞬間…'},
+        measure:'サンダーは本体とサイドハンドルを両手でしっかり保持する。加工物はクランプや当て木で固定し、刃は真っ直ぐ入れてこじらない。切り込みの開きが閉じて刃を挟まないよう、切り離す側を支える。体を刃の回転方向の延長線上に置かない。' },
+      { name:'タイル切断の下敷きにスタイロフォームを使用', short:'下敷きがスタイロ', center:[0.8,0.5,-3.85], size:[1.4,1.2,1.3],
+        exp:{fx:'stylo', from:[1.7,0,-3.0], look:[0.8,0.05,-4.0], text:'刃がタイルを抜け、下のスタイロに食い込んだ瞬間…'},
+        measure:'下敷きはコンパネ等の硬く安定した台を使い、柔らかいスタイロフォーム等で代用しない。加工物は固定し、刃の進む先に手や体を置かない。切り終わりは刃が下の材料に食い込まないよう、切込み深さと押し付け力に注意する。' },
+      { name:'保護メガネなし・刃のカバー（覆い）を外して使用', short:'保護メガネ・カバーなし', center:[6.0,0.9,-4.15], size:[1.6,1.9,1.1],
+        exp:{fx:'eye', from:[6.0,0,-2.8], look:[6.0,0.9,-3.9], text:'削った破片が、顔に向かって飛んできて…'},
+        measure:'保護メガネ（必要に応じて防災面）を着用する。といしの覆い（カバー）は外さない（安衛則第117条）。作業開始前には1分以上、といしを取り替えたときは3分以上試運転する（同第118条）。といしの取替え・試運転は特別教育を受けた者が行う。' },
+      { name:'加工場の足元に延長コードが散乱（刃で巻き込み・断線のおそれ）', short:'コードの散乱', center:[-1.55,0.1,-2.3], size:[1.6,0.25,1.1],
+        exp:{fx:'shock', from:[-1.6,0,-1.2], look:[-1.6,0,-2.3], text:'加工中、足元のコードを刃が巻き込んで断線！ しかも足元は濡れていて…'},
+        measure:'コードは整理し、加工範囲の外・作業者の背後に回す。余ったコードを足元に置かず、作業場を整理整頓する。使用前にコードの被覆の損傷を点検し（安衛則第336条）、電源は漏電遮断器付きの分電盤・コードリールから取る（同第333条）。' },
+      { name:'加工場の濡れた床・水たまり', short:'濡れた床・水たまり', center:[-1.1,0.12,-3.8], size:[1.4,0.35,0.9],
+        exp:{fx:'shock', from:[-1.1,0,-3.0], look:[-1.1,0,-3.8], text:'濡れた足元のまま作業中、刃がコードを巻き込んで断線した瞬間…'},
+        measure:'作業場の水気を取り除き、乾いた場所で作業する。濡れた場所で電動工具を使うときは必ず漏電遮断器付きの電源を使い（安衛則第333条）、絶縁性の長靴・手袋を着用する。コードを水たまりに通さない。' },
+      { name:'軍手を着けてサンダー作業（巻き込まれ）', short:'軍手で作業', center:[7.6,0.95,-1.45], size:[1.1,0.6,1.0],
+        exp:{fx:'glove', from:[7.6,0,-0.45], look:[7.6,0.9,-1.35], text:'軍手の指先が、回転する刃に引き込まれた瞬間…'},
+        measure:'回転する刃のある工具では軍手を使わない（参考：安衛則第111条）。巻き込まれにくい、手にフィットした保護手袋（革手袋・耐切創手袋等）を使う。サイドハンドルを付けて両手で保持し、刃のカバーを外さない。刃の近くに指を出さない。' },
+    ],
+    build(g){
+      buildShell(g,{CH:2.8,names:['A ブロック加工','B タイル加工','C 金物加工'],floor:'#a8a59e',signDx:[1.2,-1.4,-1.6]});
+      const add=(m,x,y,z,ry=0)=>{ m.position.set(x,y,z); m.rotation.y=ry; g.add(m); pick(m); return m; };
+      const wallSign=(t,x,y,z,ry,o)=>{ const s=P.sign(t,o); s.position.set(x,y,z); s.rotation.y=ry; g.add(s); return s; };
+
+      /* ===== A ブロック加工 ===== */
+      // 危険：キックバック（片手持ち・ブロック未固定・サイドハンドルなし）
+      { const a=new THREE.Group(); g.add(a); pick(a);
+        const t=ptex('horse',256,64,(c,W,H)=>grain(c,W,H,'#b98d58','#7c5a35'));
+        const top=pbox(0.9,0.06,0.32,{top:t,side:0x8a6a40}); top.position.set(-6.0,0.5,-3.6); a.add(top);
+        for(const x of [-6.35,-5.65]){ bar([x,0,-3.75],[x,0.48,-3.6],0.04,M(0x8a6a40),a); bar([x,0,-3.45],[x,0.48,-3.6],0.04,M(0x8a6a40),a); }
+        const b=P.block(); b.position.set(-6.0,0.625,-3.6); a.add(b);
+        box(a,0.006,0.1,0.152,M(0x3f3f3f),-5.95,0.67,-3.6);
+        const w=makeWorker({lean:-0.55,oneHand:true,hand:[0.0,0.85,-0.6],wear:0x3b5b8c}); w.position.set(-6.75,0,-3.6); w.rotation.y=-Math.PI/2; a.add(w);
+        const gr=makeGrinder(true,false); gr.rotation.set(Math.PI/2,0,0); gr.position.set(-5.95,0.76,-3.6); a.add(gr); }
+      // 正しい例：保護メガネ・両手持ち・万力で固定
+      { const e=new THREE.Group(); g.add(e); pick(e);
+        const bn=P.bench(1.0,0.6); bn.rotation.y=Math.PI/2; bn.position.set(-3.6,0,-4.2); e.add(bn);
+        box(e,0.25,0.12,0.15,M(0x1e40af),-3.6,0.94,-4.5); const vl=P.sign('万力',{w:0.12,h:0.05,bg:'#fff'}); vl.position.set(-3.73,0.94,-4.5); vl.rotation.y=-Math.PI/2; e.add(vl);
+        const b=P.block(); b.rotation.y=Math.PI/2; b.position.set(-3.6,0.97,-4.15); e.add(b);
+        const w=makeWorker({glasses:'on',hand:[0.14,0.98,-0.45],wear:0x4a6b3a}); w.position.set(-4.2,0,-4.2); w.rotation.y=-Math.PI/2; e.add(w);
+        const gr=makeGrinder(); gr.rotation.set(Math.PI/2,Math.PI/2,0); gr.position.set(-3.65,1.06,-4.0); e.add(gr); }
+      // 資材
+      add(P.blockStack(2,3,3),-8.3,0,-4.3); add(P.blockStack(2,3,2),-8.3,0,-1.0);
+      { const pile=new THREE.Group(); for(let i=0;i<5;i++){ const b=P.block(); b.scale.set(0.5+Math.random()*0.4,1,1); b.position.set((Math.random()-0.5)*0.5,0.095,(Math.random()-0.5)*0.4); b.rotation.y=Math.random()*3; pile.add(b); } add(pile,-7.0,0,-0.6); }
+      add(P.cone(),-5.0,0,-1.0); add(P.extinguisher(),-3.45,0,-0.35); add(P.trash(),-4.3,0,-0.6);
+      wallSign('保護メガネ着用',-6.0,1.8,-0.01,Math.PI,{bg:'#1d4ed8',w:0.9,h:0.3});
+
+      /* ===== B タイル加工 ===== */
+      // 危険：スタイロフォームを下敷きにしてタイル切断
+      { const b=new THREE.Group(); g.add(b); pick(b);
+        const st=P.styro(); st.position.set(0.8,0.025,-4.0); b.add(st);
+        const tl=P.tiles(1); tl.position.set(0.8,0.056,-4.0); b.add(tl);
+        box(b,0.008,0.02,0.5,M(0x1e3a5f),0.82,0.045,-4.0);
+        const w=makeWorker({lean:-1.0,hand:[0.12,0.3,-0.45],wear:0x6b4a3a}); w.position.set(0.8,0,-3.4); b.add(w);
+        const gr=makeGrinder(); gr.rotation.set(Math.PI/2,Math.PI/2,0); gr.position.set(0.82,0.1,-3.85); b.add(gr);
+        const ply=P.plywood(); ply.rotation.x=-0.12; ply.position.set(2.2,0.9,-4.85); b.add(ply); }
+      // 危険：散乱したコード（1本は水たまりを通る）
+      { const d=new THREE.Group(); g.add(d); pick(d);
+        const reel=P.reel(false,false); reel.position.set(-2.4,0,-1.2); d.add(reel);
+        const cols=[0x1f1f1f,0xf97316,0x2a2a2a];
+        const ends=[[[-3.0,0.02,-2.5],[-4.0,0.02,-2.6],[-5.6,0.02,-3.3]],[[0.2,0.02,-3.0],[0.6,0.02,-3.4]],[[-1.4,0.02,-3.5],[-1.0,0.02,-3.9],[-0.5,0.02,-4.2],[-0.2,0.02,-4.6]]];
+        for(let k=0;k<3;k++){ const pts=[[-2.3,0.02,-1.3]]; let x=-2.4, z=-1.6-k*0.1;
+          for(let i=0;i<5;i++){ x+=0.15+Math.random()*0.2; z+=(Math.random()-0.5)*0.5; z=clamp(z,-2.9,-1.7); pts.push([x,0.02,z]); }
+          pts.push(...ends[k]); cord(d,pts,cols[k],0.012); }
+        for(const [x,z,r] of [[-1.9,-2.2,0.18],[-1.2,-2.6,0.14],[-0.9,-1.9,0.2]]){ const t=new THREE.Mesh(new THREE.TorusGeometry(r,0.011,6,20),M(0x1f1f1f)); t.rotation.x=Math.PI/2; t.position.set(x,0.015,z); d.add(t); } }
+      // 危険：濡れた床・水たまり（タイルを濡らした水がこぼれている）
+      { const pm=new THREE.MeshPhongMaterial({color:0x4d6f94,transparent:true,opacity:0.7,shininess:120,specular:0xffffff});
+        const pud=new THREE.Mesh(new THREE.CircleGeometry(1,32),pm); pud.scale.set(0.65,0.42,1); pud.rotation.x=-Math.PI/2; pud.position.set(-1.1,0.012,-3.8); g.add(pud); pick(pud);
+        const pail=P.pail('#2563eb','水'); pail.rotation.z=Math.PI/2; pail.position.set(-0.35,0.15,-4.45); g.add(pail); pick(pail); }
+      // 資材
+      { const tb=new THREE.Group(); for(let i=0;i<3;i++){ const c=P.cardboard(0.35,0.22,0.35,'タイル'); c.position.set(0,0.11+i*0.22,0); c.rotation.y=i*0.15; tb.add(c); } add(tb,2.4,0,-1.0); }
+      add(P.pail('#ef6c00','タイル接着剤'),1.8,0,-1.8); add(P.toolbox(0xc62828),-1.1,0,-0.5);
+      wallSign('整理整頓',1.6,1.8,-0.01,Math.PI,{bg:'#16a34a',w:0.8,h:0.28});
+
+      /* ===== C 金物加工 ===== */
+      // 危険：保護メガネなし・カバーなし
+      { const c=new THREE.Group(); g.add(c); pick(c);
+        const bn=P.bench(1.2,0.6); bn.position.set(6.0,0,-3.9); c.add(bn);
+        box(c,0.4,0.02,0.25,M(0x6b7280),6.0,0.885,-3.95);
+        const w=makeWorker({hand:[0.13,0.98,-0.42],wear:0x334155}); w.position.set(6.0,0,-4.5); w.rotation.y=Math.PI; c.add(w);
+        const gr=makeGrinder(false); gr.rotation.set(Math.PI/2,Math.PI/2,0.3); gr.position.set(6.0,0.97,-3.95); c.add(gr);
+        const gd=new THREE.Mesh(new THREE.CylinderGeometry(0.07,0.07,0.025,20,1,true,0,Math.PI),new THREE.MeshLambertMaterial({color:0x9ca3af,side:THREE.DoubleSide})); gd.position.set(6.5,0.89,-3.75); gd.rotation.z=Math.PI/2; c.add(gd);
+        const gl=P.sign('外したカバー',{w:0.2,h:0.05,bg:'#fff'}); gl.rotation.x=-Math.PI/2; gl.position.set(6.5,0.877,-3.65); c.add(gl);
+        const sp=new THREE.MeshBasicMaterial({color:0xffb020});
+        for(let i=0;i<14;i++){ const a=-0.6+Math.random()*1.2, l=0.08+Math.random()*0.25; const s=box(c,0.006,0.006,l,sp,6.0+Math.sin(a)*(0.1+l/2),0.92+Math.random()*0.15,-3.85+Math.cos(a)*(0.1+l/2)); s.rotation.y=a; } }
+      // 危険：軍手で作業（サイドハンドルなし）
+      { const e=new THREE.Group(); g.add(e); pick(e);
+        const bn=P.bench(0.9,0.6); bn.position.set(7.6,0,-1.3); e.add(bn);
+        box(e,0.5,0.03,0.2,M(0x6b7280),7.6,0.89,-1.33);
+        const w=makeWorker({glasses:'on',gloves:true,hand:[0.08,0.98,-0.42],wear:0x7c2d12}); w.position.set(7.6,0,-1.85); w.rotation.y=Math.PI; e.add(w);
+        const gr=makeGrinder(true,false); gr.rotation.set(Math.PI/2,Math.PI/2,0.15); gr.position.set(7.62,0.98,-1.4); e.add(gr); }
+      // 資材
+      add(P.steel(),4.5,0,-4.5);
+      add(P.shelf(s=>{ for(const [x,y] of [[-0.35,0.355],[0.0,0.355],[0.35,0.355]]){ const d=P.discBox(); d.position.set(x,y,0); s.add(d); }
+        const b1=P.cardboard(0.4,0.25,0.3,'ボルト'); b1.position.set(-0.3,1.04,0); s.add(b1); const b2=P.cardboard(0.4,0.25,0.3,'ナット'); b2.position.set(0.25,1.04,0); s.add(b2);
+        const b3=P.cardboard(0.5,0.2,0.35,'保護メガネ'); b3.position.set(0,1.615,0); s.add(b3); }),8.45,0,-3.7,Math.PI/2);
+      { const ct=P.cart(); const cb=P.cardboard(0.5,0.3,0.4,'金物'); cb.position.set(-0.1,0.4,0); ct.add(cb); add(ct,4.2,0,-1.0); }
+      add(P.cone(),5.2,0,-2.4); add(P.reel(false,true),8.4,0,-0.6);
+      wallSign('回転工具 軍手禁止',4.6,1.85,-0.01,Math.PI,{bg:'#dc2626',w:1.1,h:0.28});
+    },
+    async experience(h){
+      if(!effectOn){ await fade(0,1,0.6); black.material.opacity=1; return; }   // 演出なし：暗転のみ（血・火花も出さない）
+      const fx=h.exp.fx;
+      const burst=(origin,color,n=16)=>{ const pm=new THREE.MeshBasicMaterial({color,depthTest:false,fog:false}); const ps=[];
+        for(let i=0;i<n;i++){ const p=new THREE.Mesh(new THREE.BoxGeometry(0.008,0.008,0.008),pm); p.renderOrder=9996;
+          p.userData.a=origin.clone(); p.userData.b=origin.clone().add(new THREE.Vector3((Math.random()-0.5)*0.5,Math.random()*0.3,(Math.random()-0.2)*0.3));
+          p.position.copy(origin); camera.add(p); ps.push(p); }
+        return ps; };
+      const clear=(objs)=>objs.forEach(o=>{ camera.remove(o); disposeTree(o); });
+      if(fx==='eye'){
+        sfx.grind(1.0);
+        const pm=new THREE.MeshBasicMaterial({color:0xffa31a,depthTest:false,fog:false}); const parts=[];
+        for(let i=0;i<14;i++){ const p=new THREE.Mesh(new THREE.BoxGeometry(0.012,0.012,0.012),pm); p.renderOrder=9996;
+          p.userData.a=new THREE.Vector3((Math.random()-0.5)*0.6,-0.3+Math.random()*0.2,-1.6); p.userData.b=new THREE.Vector3((Math.random()-0.5)*0.14,(Math.random()-0.5)*0.1,-0.24);
+          p.position.copy(p.userData.a); camera.add(p); parts.push(p); }
+        await wait(0.5);
+        await tween(0.3,k=>parts.forEach(p=>p.position.lerpVectors(p.userData.a,p.userData.b,k*k)));
+        sfx.bang(); hapticAll(0.4,120);
+        await tween(0.25,k=>{ whiteOv.material.opacity=0.6*k; });
+        await fade(0,1,0.3);
+        clear(parts); whiteOv.material.opacity=0;
+        black.material.opacity=1; return;
+      }
+      const gr=makeGrinder(true, fx!=='glove'); gr.rotation.order='YXZ'; const disc=gr.userData.disc;
+      gr.position.set(0.08,-0.32,-0.6); gr.rotation.set(Math.PI/2,Math.PI/2+0.25,0); camera.add(gr);
+      gr.traverse(o=>{ if(o.material){ o.material.depthTest=false; } o.renderOrder=9996; });
+      const spin=()=>{ disc.rotation.y+=0.9; };
+      sfx.grind(1.4);
+      if(fx==='kick'){
+        await tween(0.7,()=>spin());
+        sfx.bang(); hapticAll(0.6,150);
+        await tween(0.22,k=>{ spin(); const e=1-(1-k)*(1-k); gr.position.set(0.08-0.06*e,-0.32+0.16*e,-0.6+0.3*e); gr.rotation.x=Math.PI/2-0.9*e; setVignette(1,0.7-0.4*e); });
+        await wait(0.15); await fade(0,1,0.25);
+      } else if(fx==='stylo'){
+        await tween(0.7,()=>spin());
+        sfx.bang(); hapticAll(0.5,150);
+        await tween(0.25,k=>{ spin(); const e=1-(1-k)*(1-k); gr.position.set(0.08-0.05*e,-0.32+0.12*e,-0.6+0.32*e); gr.rotation.y=Math.PI/2+0.25-1.2*e; gr.rotation.z=0.5*e; setVignette(1,0.7-0.4*e); });
+        await wait(0.15); await fade(0,1,0.25);
+      } else if(fx==='shock'){
+        await tween(0.6,()=>spin());
+        await tween(0.3,k=>{ spin(); gr.position.set(0.08,-0.32-0.12*k,-0.6+0.03*k); gr.rotation.x=Math.PI/2+0.5*k; });
+        sfx.bang(); hapticAll(0.4,100);
+        const parts=burst(gr.position.clone().add(new THREE.Vector3(0,-0.05,0)),0xffe08a);
+        await tween(0.3,k=>{ spin(); parts.forEach(p=>p.position.lerpVectors(p.userData.a,p.userData.b,Math.sqrt(k))); });
+        sfx.zap(); hapticAll(0.45,300);
+        await tween(0.4,k=>{ setVignette(1,0.8*(1-k),0x5a0000); black.material.opacity=smooth(0.35,1,k); });
+        clear(parts);
+      } else if(fx==='glove'){
+        const glove=new THREE.Group(); glove.position.set(-0.14,-0.36,-0.5); camera.add(glove);
+        const gm=gunteMat(); gm.depthTest=false;
+        const palm=new THREE.Mesh(new THREE.BoxGeometry(0.09,0.03,0.1),gm); palm.renderOrder=9996; glove.add(palm);
+        for(let i=0;i<4;i++){ const f=new THREE.Mesh(new THREE.BoxGeometry(0.018,0.02,0.07),gm); f.position.set(-0.03+i*0.02,0,-0.08); f.renderOrder=9996; glove.add(f); }
+        glove.rotation.y=-0.5;
+        await tween(0.6,()=>spin());
+        await tween(0.35,k=>{ spin(); glove.position.set(-0.14+0.18*k,-0.36-0.01*k,-0.5-0.08*k); });
+        sfx.bang(); hapticAll(0.6,150);
+        drawSplat('blood'); splat.visible=true;
+        await tween(0.12,k=>{ splat.material.opacity=k; setVignette(1,0.7-0.3*k); });
+        await wait(0.35);
+        await fade(0,1,0.4);
+        splat.visible=false; splat.material.opacity=0; clear([glove]);
+      }
+      camera.remove(gr); disposeTree(gr);
+      black.material.opacity=1; setVignette(0,0.6);
+    },
+  };
+})();
+
+// ★ メニューに出すシナリオ（ここに追加していけば最大10個まで並びます）
+const SCENARIOS=[SC_ASHIBA, SC_KANDEN, SC_MORTAR, SC_GRINDER];
+
+/* =====================================================================
+   UI（3Dパネル）
+   ===================================================================== */
+const buttons=[];
+function makePanel(wm,hm,pxW,renderOrder=50){
+  const pxH=Math.round(pxW*hm/wm);
+  const c=document.createElement('canvas'); c.width=pxW; c.height=pxH;
+  const tex=new THREE.CanvasTexture(c); tex.colorSpace=THREE.SRGBColorSpace; tex.anisotropy=8;
+  const mesh=new THREE.Mesh(new THREE.PlaneGeometry(wm,hm),new THREE.MeshBasicMaterial({map:tex,transparent:true,depthTest:false,depthWrite:false,fog:false}));
+  mesh.renderOrder=renderOrder;
+  return {mesh,g:c.getContext('2d'),tex,w:pxW,h:pxH};
+}
+function makeButton(wm,hm,getLabel,onClick,color='#f59e0b'){
+  const pxW=512, pxH=Math.round(512*hm/wm);
+  const c=document.createElement('canvas'); c.width=pxW; c.height=pxH; const g=c.getContext('2d');
+  const tex=new THREE.CanvasTexture(c); tex.colorSpace=THREE.SRGBColorSpace;
+  const mesh=new THREE.Mesh(new THREE.PlaneGeometry(wm,hm),new THREE.MeshBasicMaterial({map:tex,transparent:true,depthTest:false,depthWrite:false,fog:false}));
+  mesh.renderOrder=60;
+  const b={mesh,onClick,hover:false,
+    draw(){ g.clearRect(0,0,pxW,pxH); rr(g,5,5,pxW-10,pxH-10,pxH*0.3);
+      g.fillStyle=b.hover?'#fde047':color; g.fill(); g.lineWidth=7; g.strokeStyle='#fff'; g.stroke();
+      let fs=pxH*0.42; const t=getLabel(); g.font=`bold ${fs}px ${FONT}`;
+      while(g.measureText(t).width>pxW-40 && fs>10){ fs-=2; g.font=`bold ${fs}px ${FONT}`; }
+      g.fillStyle='#111'; g.textAlign='center'; g.textBaseline='middle'; g.fillText(t,pxW/2,pxH/2+2); tex.needsUpdate=true; },
+    setHover(v){ if(v!==b.hover){ b.hover=v; b.draw(); } } };
+  mesh.userData.btn=b; b.draw(); buttons.push(b); return b;
+}
+function isShown(o){ while(o){ if(!o.visible) return false; o=o.parent; } return true; }
+const activeButtonMeshes=()=>buttons.filter(b=>isShown(b.mesh)).map(b=>b.mesh);
+const fxLabel=()=>`演出：${effectOn?'あり':'なし（暗転のみ）'}`;
+const fxButtons=[];
+function setEffect(v){ effectOn=v; document.getElementById('fxOpt').checked=v; fxButtons.forEach(b=>b.draw()); }
+
+// メニュー
+const menu=makePanel(2.0,1.75,1600); scene.add(menu.mesh);
+(function drawMenu(){
+  const {g,w,h}=menu; g.clearRect(0,0,w,h);
+  rr(g,6,6,w-12,h-12,40); g.fillStyle='rgba(12,22,38,0.93)'; g.fill(); g.lineWidth=8; g.strokeStyle='#f59e0b'; g.stroke();
+  g.textAlign='center'; g.textBaseline='top';
+  g.fillStyle='#fbbf24'; g.font=`bold 76px ${FONT}`; g.fillText('KY（危険予知）体験VR',w/2,48);
+  g.fillStyle='#fff'; g.font=`40px ${FONT}`; g.fillText('体験するシナリオを選んでください（指差し・クリック）',w/2,150);
+  g.fillStyle='#fca5a5'; g.font=`30px ${FONT}`; g.fillText('※気分が悪くなったら、すぐにヘッドセットを外して休んでください。',w/2,h-70);
+  menu.tex.needsUpdate=true;
+})();
+SCENARIOS.slice(0,10).forEach((sc,i)=>{
+  const b=makeButton(0.88,0.17,()=>`${i+1}. ${sc.title}`,()=>{ if(state==='menu') transition(()=>goIntro(sc)); });
+  b.mesh.position.set(i%2===0?-0.48:0.48, 0.42-Math.floor(i/2)*0.21, 0.01); menu.mesh.add(b.mesh);
+});
+{ const b=makeButton(0.8,0.13,fxLabel,()=>setEffect(!effectOn),'#94a3b8'); b.mesh.position.set(0,-0.62,0.01); menu.mesh.add(b.mesh); fxButtons.push(b); }
+
+// 説明
+const intro=makePanel(1.8,1.2,1536); scene.add(intro.mesh);
+function drawIntro(){
+  const {g,w,h}=intro; g.clearRect(0,0,w,h);
+  rr(g,6,6,w-12,h-12,40); g.fillStyle='rgba(12,22,38,0.93)'; g.fill(); g.lineWidth=8; g.strokeStyle='#f59e0b'; g.stroke();
+  let y=44; const x=70, mw=w-140;
+  y=para(g,cur.introTitle,x,y,64,'#fbbf24',mw,1.3,true,true)+16;
+  const ps=[...cur.introLines.map(([t,c])=>[t,c,42]),
+    [`制限時間${cur.timeLimit}秒で、危険だと思う場所を指差し（トリガー／クリック）してください。お手つきは${PENALTY}秒減ります。`,'#fff',42],
+    ['VR：トリガー＝指差し　左スティック＝移動　右スティック＝向き変更','#93c5fd',34],
+    ['PC：ドラッグ＝見回し　クリック＝指差し　WASD・矢印キー＝移動','#93c5fd',34]];
+  for(const [t,c,s] of ps) y=para(g,t,x,y,s,c,mw,1.38,true,false)+12;
+  intro.tex.needsUpdate=true;
+}
+{ const b=makeButton(0.5,0.15,()=>'スタート',()=>{ if(state==='intro'){ initAudio(); startGame(); } }); b.mesh.position.set(-0.6,-0.48,0.01); intro.mesh.add(b.mesh); }
+{ const b=makeButton(0.62,0.15,fxLabel,()=>setEffect(!effectOn),'#94a3b8'); b.mesh.position.set(0.0,-0.48,0.01); intro.mesh.add(b.mesh); fxButtons.push(b); }
+{ const b=makeButton(0.48,0.15,()=>'メニューへ',()=>{ if(state==='intro') transition(goMenu); },'#cbd5e1'); b.mesh.position.set(0.6,-0.48,0.01); intro.mesh.add(b.mesh); if(SOLO) b.mesh.visible=false; }
+
+// 結果
+const result=makePanel(2.2,2.3,2048); scene.add(result.mesh);
+{ const b=makeButton(0.8,0.17,()=>'もう一度挑戦',()=>{ if(state==='result') transition(()=>{ toStart(); startGame(); }); }); b.mesh.position.set(SOLO?0:-0.45,-1.02,0.01); result.mesh.add(b.mesh); }
+{ const b=makeButton(0.8,0.17,()=>'シナリオ選択へ',()=>{ if(state==='result') transition(goMenu); },'#cbd5e1'); b.mesh.position.set(0.45,-1.02,0.01); result.mesh.add(b.mesh); if(SOLO) b.mesh.visible=false; }
+// 項目ごとの「演出を見る」ボタン（結果画面の各行の右端）
+const replayBtns=[];
+for(let i=0;i<10;i++){ const b=makeButton(0.3,0.085,()=>'▶ 演出を見る',()=>{ if(state==='result'&&hazards[i]) replayExperience(hazards[i]); },'#7dd3fc'); b.mesh.visible=false; result.mesh.add(b.mesh); replayBtns.push(b); }
+const rowY=[];
+let lastResult={reason:'timeup',fell:null};
+function layoutResult(g,s,draw){
+  const W=result.w, x=80, mw=W-160; let y=60;
+  const {reason,fell}=lastResult;
+  const nFound=hazards.filter(h=>h.found).length;
+  y=para(g,`${cur.title}　結果：危険 ${nFound} / ${hazards.length} か所 発見`,x,y,76*s,nFound===hazards.length?'#4ade80':'#fbbf24',mw,1.25,draw,true)+10*s;
+  let sub = reason==='all' ? '全ての危険を発見しました。ヨシ！' : '時間切れ。見落とした危険があります。';
+  sub += `　（お手つき ${wrong} 回）`;
+  y=para(g,sub,x,y,42*s,'#e5e7eb',mw,1.4,draw,false);
+  if(fell) y=para(g,`疑似体験：「${fell.name}」の見落とし`,x,y,42*s,'#fca5a5',mw,1.4,draw,false);
+  y+=16*s; if(draw){ g.fillStyle='#475569'; g.fillRect(x,y,mw,4); } y+=30*s;
+  for(const h of hazards){
+    g.font=`bold ${50*s}px ${FONT}`;
+    if(draw){ g.textBaseline='top'; g.textAlign='left'; g.fillStyle=h.found?'#4ade80':'#f87171'; g.fillText(h.found?'○ 発見':'× 見落とし',x,y); }
+    const off=g.measureText('× 見落とし　').width;
+    if(draw) rowY[hazards.indexOf(h)]=y+25*s;
+    y=para(g,h.name,x+off,y,50*s,'#fff',mw-off-330,1.3,draw,true)+4*s;
+    y=para(g,'対策：'+h.measure,x+30*s,y,36*s,'#cbd5e1',mw-30*s,1.42,draw,false)+24*s;
+  }
+  y=para(g,cur.footer,x,y,38*s,'#fde68a',mw,1.4,draw,false);
+  y=para(g,'※試作教材です。法令・基準は最新の条文や社内規程で確認してください。',x,y+6*s,30*s,'#94a3b8',mw,1.4,draw,false);
+  return y;
+}
+function drawResult(){
+  const {g,w,h}=result; let s=1;
+  for(let i=0;i<12;i++){ if(layoutResult(g,s,false)<=h-230) break; s*=0.94; }
+  g.clearRect(0,0,w,h); rr(g,6,6,w-12,h-12,50); g.fillStyle='rgba(12,22,38,0.94)'; g.fill(); g.lineWidth=10; g.strokeStyle='#f59e0b'; g.stroke();
+  layoutResult(g,s,true); result.tex.needsUpdate=true;
+  const k=2.3/h;   // px → m
+  replayBtns.forEach((b,i)=>{ b.mesh.visible=i<hazards.length; if(b.mesh.visible) b.mesh.position.set(1.1-0.21,1.15-rowY[i]*k,0.01); });
+}
+function showPanel(p){ for(const q of [menu,intro,result]) q.mesh.visible=(q===p); }
+
+// HUD・字幕（頭に追従）
+const hud=makePanel(0.5,0.0875,640,10001); hud.mesh.position.set(0,-0.28,-1.0); hud.mesh.visible=false; camera.add(hud.mesh);
+function drawHud(){
+  const {g,w,h}=hud; g.clearRect(0,0,w,h); rr(g,2,2,w-4,h-4,26); g.fillStyle='rgba(10,20,30,0.78)'; g.fill();
+  g.font=`bold 50px ${FONT}`; g.textBaseline='middle';
+  g.textAlign='left'; g.fillStyle=timeLeft<=10?'#f87171':'#fff'; g.fillText(`残り ${Math.max(0,Math.ceil(timeLeft))}秒`,30,h/2+2);
+  g.textAlign='right'; g.fillStyle='#fbbf24'; g.fillText(`発見 ${found}/${hazards.length}`,w-30,h/2+2);
+  hud.tex.needsUpdate=true;
+}
+const caption=makePanel(1.1,0.4,1100,10002); caption.mesh.position.set(0,0.02,-1.0); caption.mesh.visible=false; camera.add(caption.mesh);
+function showCaption(title,body){
+  const {g,w,h}=caption; g.clearRect(0,0,w,h); rr(g,4,4,w-8,h-8,30); g.fillStyle='rgba(0,0,0,0.8)'; g.fill();
+  let y=34; if(title) y=para(g,title,50,y,62,'#fbbf24',w-100,1.25,true,true)+10;
+  para(g,body,50,y,40,'#fff',w-100,1.45,true,false);
+  caption.tex.needsUpdate=true; caption.mesh.visible=true;
+}
+const hideCaption=()=>{ caption.mesh.visible=false; };
+
+// 画面効果（暗転・白濁・しぶき・ビネット）
+const black=new THREE.Mesh(new THREE.SphereGeometry(0.3,16,12),new THREE.MeshBasicMaterial({color:0,transparent:true,opacity:0,side:THREE.BackSide,depthTest:false,depthWrite:false,fog:false}));
+black.renderOrder=10000; camera.add(black);
+const whiteOv=new THREE.Mesh(new THREE.SphereGeometry(0.32,16,12),new THREE.MeshBasicMaterial({color:0xf2f0ea,transparent:true,opacity:0,side:THREE.BackSide,depthTest:false,depthWrite:false,fog:false}));
+whiteOv.renderOrder=9997; camera.add(whiteOv);
+const splatCanvas=document.createElement('canvas'); splatCanvas.width=splatCanvas.height=512;
+const splatTex=new THREE.CanvasTexture(splatCanvas); splatTex.colorSpace=THREE.SRGBColorSpace;
+const splat=new THREE.Mesh(new THREE.PlaneGeometry(0.9,0.9),new THREE.MeshBasicMaterial({map:splatTex,transparent:true,opacity:0,depthTest:false,depthWrite:false,fog:false}));
+splat.position.set(0,0,-0.25); splat.renderOrder=9998; splat.visible=false; camera.add(splat);
+// kind: 'mortar'＝灰色のしぶき／'blood'＝赤いしぶき（様式的な表現）
+function drawSplat(kind='mortar'){
+  const c=splatCanvas.getContext('2d'); c.clearRect(0,0,512,512);
+  const n=kind==='blood'?14:22;
+  for(let i=0;i<n;i++){
+    const x=60+Math.random()*392, y=60+Math.random()*392, r=(kind==='blood'?6:8)+Math.random()*(kind==='blood'?30:38), v=150+Math.random()*50|0;
+    c.fillStyle= kind==='blood' ? `rgba(${120+Math.random()*50|0},0,${Math.random()*15|0},0.85)` : `rgba(${v},${v-4},${v-14},0.92)`;
+    c.beginPath(); c.arc(x,y,r,0,Math.PI*2); c.fill();
+    for(let j=0;j<5;j++){ const a=Math.random()*Math.PI*2, d=r*(1+Math.random()*0.8); c.beginPath(); c.arc(x+Math.cos(a)*d,y+Math.sin(a)*d,r*0.25*Math.random()+2,0,Math.PI*2); c.fill(); }
+    if(Math.random()<0.5){ c.fillRect(x-r*0.2,y,r*0.4,r*(1+Math.random()*2)); }
+  }
+  splatTex.needsUpdate=true;
+}
+const vig=new THREE.Mesh(new THREE.PlaneGeometry(1.2,1.2),new THREE.ShaderMaterial({
+  transparent:true,depthTest:false,depthWrite:false,
+  uniforms:{uA:{value:0},uR:{value:0.6},uC:{value:new THREE.Color(0,0,0)}},
+  vertexShader:'varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}',
+  fragmentShader:'varying vec2 vUv;uniform float uA;uniform float uR;uniform vec3 uC;void main(){float d=length(vUv-0.5)*2.0;float a=smoothstep(uR,uR+0.35,d)*uA;gl_FragColor=vec4(uC,a);}'
+}));
+vig.position.set(0,0,-0.2); vig.renderOrder=9999; camera.add(vig);
+function setVignette(a,r,color=0x000000){ const u=vig.material.uniforms; u.uA.value=a; u.uR.value=r; u.uC.value.set(color); vig.visible=a>0.01; }
+setVignette(0,0.6);
+function resetFX(){ black.material.opacity=0; whiteOv.material.opacity=0; splat.visible=false; splat.material.opacity=0; setVignette(0,0.6); hideCaption(); }
+
+// マーカー
+const markers=new THREE.Group(); scene.add(markers);
+const wrongMarks=[];
+function makeLabel(text,bg,hM=0.16){
+  const c=document.createElement('canvas'); const g=c.getContext('2d'); const fs=80;
+  g.font=`bold ${fs}px ${FONT}`; const tw=Math.ceil(g.measureText(text).width);
+  c.width=tw+70; c.height=130; g.font=`bold ${fs}px ${FONT}`;
+  rr(g,4,4,c.width-8,c.height-8,30); g.fillStyle=bg; g.fill(); g.lineWidth=6; g.strokeStyle='#fff'; g.stroke();
+  g.fillStyle='#fff'; g.textBaseline='middle'; g.fillText(text,35,c.height/2+3);
+  const t=new THREE.CanvasTexture(c); t.colorSpace=THREE.SRGBColorSpace;
+  const s=new THREE.Sprite(new THREE.SpriteMaterial({map:t,depthTest:false,depthWrite:false,transparent:true,fog:false}));
+  s.scale.set(hM*c.width/c.height,hM,1); s.renderOrder=41; return s;
+}
+
+/* =====================================================================
+   効果音
+   ===================================================================== */
+let actx=null, master=null, windGain=null, humGain=null;
+function initAudio(){
+  try{
+    if(!actx){ actx=new (window.AudioContext||window.webkitAudioContext)(); master=actx.createGain(); master.gain.value=0.9; master.connect(actx.destination); startAmbient(); setAmbient(cur?cur.ambient:'none'); }
+    if(actx.state==='suspended') actx.resume();
+  }catch(e){ console.warn(e); }
+}
+function noiseBuffer(sec,brown){
+  const n=Math.floor(actx.sampleRate*sec), b=actx.createBuffer(1,n,actx.sampleRate), d=b.getChannelData(0); let last=0;
+  for(let i=0;i<n;i++){ const w=Math.random()*2-1; if(brown){ last=(last+0.02*w)/1.02; d[i]=last*3.5; } else d[i]=w; }
+  return b;
+}
+function startAmbient(){
+  const src=actx.createBufferSource(); src.buffer=noiseBuffer(4,true); src.loop=true;
+  const f=actx.createBiquadFilter(); f.type='lowpass'; f.frequency.value=650;
+  const gust=actx.createGain(); gust.gain.value=1;
+  const lfo=actx.createOscillator(); lfo.frequency.value=0.12; const lg=actx.createGain(); lg.gain.value=0.45; lfo.connect(lg).connect(gust.gain);
+  windGain=actx.createGain(); windGain.gain.value=0;
+  src.connect(f).connect(gust).connect(windGain).connect(master); src.start(); lfo.start();
+  const o1=actx.createOscillator(); o1.type='triangle'; o1.frequency.value=100;
+  const o2=actx.createOscillator(); o2.type='sine'; o2.frequency.value=200;
+  const hf=actx.createBiquadFilter(); hf.type='lowpass'; hf.frequency.value=400;
+  humGain=actx.createGain(); humGain.gain.value=0;
+  o1.connect(hf); o2.connect(hf); hf.connect(humGain).connect(master); o1.start(); o2.start();
+}
+function setAmbient(type){
+  if(!actx||!windGain) return; const t=actx.currentTime;
+  const w={wind:0.2,site:0.07,room:0.025}[type]||0, hm={site:0.03,room:0.02}[type]||0;
+  windGain.gain.setTargetAtTime(w,t,0.4); humGain.gain.setTargetAtTime(hm,t,0.4);
+}
+function tone(freq,dur,{type='sine',vol=0.2,delay=0,slide=0}={}){
+  if(!actx) return; const t=actx.currentTime+delay;
+  const o=actx.createOscillator(); o.type=type; o.frequency.setValueAtTime(freq,t); if(slide) o.frequency.exponentialRampToValueAtTime(slide,t+dur);
+  const g=actx.createGain(); g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(vol,t+0.01); g.gain.exponentialRampToValueAtTime(0.0001,t+dur);
+  o.connect(g).connect(master); o.start(t); o.stop(t+dur+0.05);
+}
+function noiseHit(dur,{type='bandpass',freq=1000,vol=0.2,q=0.8}={}){
+  if(!actx) return; const s=actx.createBufferSource(); s.buffer=noiseBuffer(dur+0.1,false);
+  const f=actx.createBiquadFilter(); f.type=type; f.frequency.value=freq; f.Q.value=q; const t=actx.currentTime;
+  const g=actx.createGain(); g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(vol,t+0.02); g.gain.exponentialRampToValueAtTime(0.0001,t+dur);
+  s.connect(f).connect(g).connect(master); s.start(t); s.stop(t+dur+0.1);
+}
+const sfx={
+  ok(){ tone(784,0.15,{vol:0.25}); tone(1175,0.28,{vol:0.25,delay:0.12}); },
+  ng(){ tone(180,0.3,{type:'square',vol:0.06}); },
+  tick(){ tone(1000,0.06,{vol:0.12}); },
+  clear(){ [523,659,784,1047].forEach((f,i)=>tone(f,0.3,{vol:0.2,delay:i*0.12})); },
+  whoosh(){ if(!actx) return; const s=actx.createBufferSource(); s.buffer=noiseBuffer(2,false);
+    const f=actx.createBiquadFilter(); f.type='bandpass'; f.Q.value=0.8; const t=actx.currentTime;
+    f.frequency.setValueAtTime(300,t); f.frequency.exponentialRampToValueAtTime(2500,t+1.5);
+    const g=actx.createGain(); g.gain.setValueAtTime(0.001,t); g.gain.exponentialRampToValueAtTime(0.45,t+1.4); g.gain.exponentialRampToValueAtTime(0.001,t+1.7);
+    s.connect(f).connect(g).connect(master); s.start(t); s.stop(t+1.8); },
+  thud(){ tone(90,0.7,{vol:0.9,slide:28}); tone(55,0.9,{type:'triangle',vol:0.6,slide:25}); },
+  zap(){ tone(120,0.45,{type:'sawtooth',vol:0.12}); tone(60,0.45,{type:'square',vol:0.05}); noiseHit(0.4,{freq:2600,vol:0.08}); },
+  splat(){ noiseHit(0.25,{type:'lowpass',freq:900,vol:0.35}); tone(140,0.15,{vol:0.2,slide:70}); },
+  grind(d){ tone(190,d,{type:'sawtooth',vol:0.06}); tone(380,d,{type:'square',vol:0.02}); noiseHit(d,{freq:5000,vol:0.05,q:1.5}); },
+  bang(){ noiseHit(0.2,{type:'lowpass',freq:700,vol:0.4}); tone(85,0.25,{vol:0.4,slide:50}); },
+};
+
+/* =====================================================================
+   トゥイーン・位置・移動
+   ===================================================================== */
+const tweens=[];
+const tween=(dur,fn)=>new Promise(res=>tweens.push({t:0,dur,fn,res}));
+const wait=s=>tween(s,()=>{});
+const fade=(a,b,d)=>tween(d,k=>{ black.material.opacity=a+(b-a)*k; });
+function updateTweens(dt){
+  for(let i=tweens.length-1;i>=0;i--){ const tw=tweens[i]; tw.t+=dt; const k=Math.min(1,tw.t/tw.dur); tw.fn(k); if(k>=1){ tweens.splice(i,1); tw.res(); } }
+}
+let pcYaw=0, pcPitch=-0.3;
+const headPos=()=>camera.getWorldPosition(new THREE.Vector3());
+function alignRig(target,yaw,pitch=-0.3){
+  target=V(target);
+  if(renderer.xr.isPresenting){
+    const d=new THREE.Vector3(); camera.getWorldDirection(d);
+    rig.rotation.y += yaw-Math.atan2(-d.x,-d.z);
+    rig.position.y = target.y; rig.updateMatrixWorld(true);
+    const p=headPos(); rig.position.x+=target.x-p.x; rig.position.z+=target.z-p.z;
+  } else {
+    rig.position.copy(target); rig.rotation.y=0; pcYaw=yaw; pcPitch=pitch;
+    camera.rotation.set(pcPitch,pcYaw,0,'YXZ');
+  }
+}
+const toStart=()=>alignRig(cur.start,0,cur.id==='ashiba'?-0.3:-0.1);
+function allowed(x,z){
+  const b=cur.bounds; if(x<b[0]||x>b[1]||z<b[2]||z>b[3]) return false;
+  for(const [x0,x1,z0,z1] of cur.blocks) if(x>x0&&x<x1&&z>z0&&z<z1) return false;
+  return true;
+}
+function moveHead(d){
+  const p=headPos();
+  if(!allowed(p.x,p.z)){ rig.position.x+=d.x; rig.position.z+=d.z; return; }
+  for(const [dx,dz] of [[d.x,d.z],[d.x,0],[0,d.z]]){ if(allowed(p.x+dx,p.z+dz)){ rig.position.x+=dx; rig.position.z+=dz; return; } }
+}
+function snapTurn(a){ const p0=headPos(); rig.rotation.y+=a; rig.updateMatrixWorld(true); const p1=headPos(); rig.position.x+=p0.x-p1.x; rig.position.z+=p0.z-p1.z; }
+
+/* =====================================================================
+   シナリオの読み込み・ゲーム進行
+   ===================================================================== */
+function disposeTree(o){ o.traverse(c=>{ if(c.geometry) c.geometry.dispose(); const ms=Array.isArray(c.material)?c.material:(c.material?[c.material]:[]); ms.forEach(m=>{ if(m.map) m.map.dispose(); m.dispose(); }); }); }
+const hitMat=new THREE.MeshBasicMaterial({colorWrite:false,depthWrite:false,side:THREE.DoubleSide});
+function loadScenario(sc){
+  if(worldGroup){ scene.remove(worldGroup); disposeTree(worldGroup); }
+  worldGroup=new THREE.Group(); scene.add(worldGroup);
+  cur=sc; pickWorld=[]; rayTargets=[];
+  scene.background=new THREE.Color(sc.sky); scene.fog=new THREE.Fog(sc.sky,sc.fog[0],sc.fog[1]);
+  sc.build(worldGroup);
+  hazards=sc.hazards.map(d=>({...d,found:false}));
+  hitBoxes=hazards.map(h=>{ const m=new THREE.Mesh(new THREE.BoxGeometry(...h.size),hitMat); m.position.set(...h.center); m.userData.haz=h; worldGroup.add(m); h.hit=m; h.box=new THREE.Box3().setFromCenterAndSize(V(h.center),V(h.size)); return m; });
+  const sh=V(sc.start).add(new THREE.Vector3(0,1.6,0));
+  for(const p of [menu,intro,result]){ p.mesh.position.set(...sc.panel); p.mesh.lookAt(sh); }
+  result.mesh.position.addScaledVector(sh.clone().sub(result.mesh.position).setY(0).normalize(),-0.25);
+  setAmbient(sc.ambient);
+}
+
+let state='idle', timeLeft=90, found=0, wrong=0, lastSec=-1;
+function resetHazards(){
+  hazards.forEach(h=>h.found=false); found=0; wrong=0; wrongMarks.length=0;
+  while(markers.children.length) markers.remove(markers.children[0]);
+}
+function goMenu(){ loadScenario(LOBBY); resetHazards(); state='menu'; showPanel(menu); hud.mesh.visible=false; resetFX(); toStart(); }
+function goIntro(sc){ loadScenario(sc); enterIntro(); }
+function enterIntro(){ resetHazards(); state='intro'; drawIntro(); showPanel(intro); hud.mesh.visible=false; resetFX(); toStart(); }
+function startGame(){ resetHazards(); timeLeft=cur.timeLimit; lastSec=-1; state='play'; showPanel(null); hud.mesh.visible=true; drawHud(); }
+function endGame(reason){ if(state!=='play') return; state='ending'; hud.mesh.visible=false; runEnding(reason); }
+function showResult(reason,fell){ lastResult={reason,fell}; drawResult(); showPanel(result); state='result'; }
+async function transition(fn){ state='busy'; await fade(0,1,0.35); fn(); await fade(1,0,0.35); }
+
+function discover(h,src){
+  h.found=true; found++;
+  const bx=new THREE.BoxGeometry(...h.size);
+  const e=new THREE.LineSegments(new THREE.EdgesGeometry(bx),new THREE.LineBasicMaterial({color:0x22ff66,depthTest:false,transparent:true}));
+  e.position.copy(h.hit.position); e.renderOrder=40; markers.add(e);
+  const f=new THREE.Mesh(bx,new THREE.MeshBasicMaterial({color:0x22ff66,transparent:true,opacity:0.15,depthWrite:false,fog:false}));
+  f.position.copy(h.hit.position); markers.add(f);
+  const l=makeLabel(`危険発見！ ${h.short}`,'#16a34a'); l.position.set(h.center[0],h.center[1]+h.size[1]/2+0.22,h.center[2]); markers.add(l);
+  sfx.ok(); pulse(src,0.8,80); drawHud();
+  if(found===hazards.length) endGame('all');
+}
+function markWrong(p,src){
+  wrong++; timeLeft=Math.max(0,timeLeft-PENALTY); drawHud();
+  const s=makeLabel(`× −${PENALTY}秒`,'#dc2626',0.14); s.position.copy(p); markers.add(s); wrongMarks.push({s,t:0});
+  sfx.ng(); pulse(src,0.3,40);
+}
+function pulse(src,i,d){ try{ src?.gamepad?.hapticActuators?.[0]?.pulse(i,d); }catch(e){} }
+function hapticAll(i,d){ if(renderer.xr.isPresenting) for(const s of renderer.xr.getSession().inputSources) pulse(s,i,d); }
+
+function handlePick(rc,src){
+  const bh=rc.intersectObjects(activeButtonMeshes(),false)[0];
+  if(bh){ bh.object.userData.btn.onClick(); return; }
+  if(state!=='play') return;
+  const hzs=rc.intersectObjects(hitBoxes,false);
+  const hz=hzs.find(i=>!i.object.userData.haz.found)||hzs[0];   // 発見済みの枠は素通りして奥の危険も指せる
+  const wh=rc.intersectObjects(pickWorld,true)[0];
+  if(hz && (!wh || hz.distance<=wh.distance+0.6)){ const h=hz.object.userData.haz; if(!h.found) discover(h,src); return; }
+  if(wh && wh.distance<40){
+    // 危険の枠の中にある物を指した場合も「発見」扱い（近づいて指したとき用）
+    const inBox=hazards.find(h=>!h.found && h.box.containsPoint(wh.point));
+    if(inBox){ discover(inBox,src); return; }
+    if(hazards.some(h=>h.found && h.box.containsPoint(wh.point))) return;
+    markWrong(wh.point,src);
+  }
+}
+
+async function runEnding(reason){
+  const missed=hazards.filter(h=>!h.found);
+  if(missed.length===0){
+    sfx.clear(); showCaption('全ての危険を発見！',cur.clearCall);
+    await wait(2.8); hideCaption(); await fade(0,1,0.5);
+    toStart(); showResult(reason,null); await fade(1,0,0.6); return;
+  }
+  const h=missed[Math.floor(Math.random()*missed.length)];
+  showCaption(reason==='timeup'?'時間切れ！':'終了',`見落とした危険：${h.name}\nもしこのまま作業を続けていたら…`);
+  await wait(3.2);
+  await fade(0,1,0.5); hideCaption();
+  await playExperience(h,4.2);
+  toStart(); showResult(reason,h);
+  await fade(1,0,0.8);
+}
+// 危険の場所へ移動 → 説明 → 疑似体験 → 暗転して締めの字幕（終了時は画面が暗転したまま）
+async function playExperience(h,endWait){
+  const from=V(h.exp.from), look=V(h.exp.look), dx=look.x-from.x, dz=look.z-from.z;
+  alignRig(from,Math.atan2(-dx,-dz),clamp(Math.atan2(look.y-(from.y+1.6),Math.hypot(dx,dz)),-0.95,0.95));
+  await fade(1,0,0.5);
+  showCaption('',h.exp.text);
+  await wait(2.2); hideCaption();
+  await cur.experience(h);
+  black.material.opacity=1;
+  await wait(0.9);
+  showCaption(cur.endTitle,cur.endBody);
+  await wait(endWait); hideCaption(); setVignette(0,0.6);
+}
+// 結果画面から、選んだ項目の演出だけを見直す
+async function replayExperience(h){
+  state='replay'; initAudio();
+  await fade(0,1,0.4); showPanel(null);
+  showCaption('演出の確認',`「${h.name}」\nもしこの危険を見落としていたら…`);
+  await wait(2.2); hideCaption();
+  await playExperience(h,3.0);
+  toStart(); showPanel(result); state='result';
+  await fade(1,0,0.6);
+}
+
+/* =====================================================================
+   VRコントローラー・PC操作
+   ===================================================================== */
+const controllers=[];
+const factory=new XRControllerModelFactory();
+const rc=new THREE.Raycaster();
+const tmpM=new THREE.Matrix4();
+function rayFromController(c){ tmpM.identity().extractRotation(c.matrixWorld); rc.ray.origin.setFromMatrixPosition(c.matrixWorld); rc.ray.direction.set(0,0,-1).applyMatrix4(tmpM); }
+for(let i=0;i<2;i++){
+  const c=renderer.xr.getController(i);
+  const lineGeo=new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,0,0),new THREE.Vector3(0,0,-1)]);
+  const line=new THREE.Line(lineGeo,new THREE.LineBasicMaterial({color:0xffffff,transparent:true,opacity:0.8}));
+  line.scale.z=5; line.visible=false; c.add(line);
+  const ret=new THREE.Mesh(new THREE.SphereGeometry(0.012,10,8),new THREE.MeshBasicMaterial({color:0xffee55,depthTest:false,fog:false}));
+  ret.renderOrder=45; ret.visible=false; c.add(ret);
+  c.userData={line,ret,src:null};
+  c.addEventListener('connected',e=>{ c.userData.src=e.data; line.visible=e.data.targetRayMode==='tracked-pointer'; });
+  c.addEventListener('disconnected',()=>{ c.userData.src=null; line.visible=false; ret.visible=false; });
+  c.addEventListener('selectstart',()=>{ initAudio(); rayFromController(c); handlePick(rc,c.userData.src); });
+  rig.add(c); controllers.push(c);
+  const grip=renderer.xr.getControllerGrip(i); grip.add(factory.createControllerModel(grip)); rig.add(grip);
+}
+function updateVRPointers(hoverSet){
+  for(const c of controllers){
+    const u=c.userData; if(!u.src||!u.line.visible) continue;
+    rayFromController(c);
+    let dist=5, hit=false;
+    const bh=rc.intersectObjects(activeButtonMeshes(),false)[0];
+    if(bh){ hoverSet.add(bh.object.userData.btn); dist=bh.distance; hit=true; u.line.material.color.set(0xfde047); }
+    else { u.line.material.color.set(0xffffff); const wh=rc.intersectObjects(rayTargets,true)[0]; if(wh&&wh.distance<20){ dist=wh.distance; hit=true; } }
+    u.line.scale.z=dist; u.ret.position.set(0,0,-dist); u.ret.scale.setScalar(Math.max(1,dist*0.6)); u.ret.visible=hit;
+  }
+}
+const canvas=renderer.domElement;
+const keys={};
+addEventListener('keydown',e=>{ keys[e.code]=true; });
+addEventListener('keyup',e=>{ keys[e.code]=false; });
+let pDown=null, pcHover=null;
+const ndc=new THREE.Vector2();
+function setRayFromMouse(e){ ndc.set((e.clientX/innerWidth)*2-1,-(e.clientY/innerHeight)*2+1); rc.setFromCamera(ndc,camera); }
+canvas.addEventListener('pointerdown',e=>{ if(renderer.xr.isPresenting) return; pDown={x:e.clientX,y:e.clientY,moved:false}; canvas.setPointerCapture(e.pointerId); });
+canvas.addEventListener('pointermove',e=>{
+  if(renderer.xr.isPresenting) return;
+  if(pDown){
+    if(Math.abs(e.clientX-pDown.x)+Math.abs(e.clientY-pDown.y)>5) pDown.moved=true;
+    if(pDown.moved){ pcYaw-=e.movementX*0.0045; pcPitch=clamp(pcPitch-e.movementY*0.0045,-1.45,1.2); }
+  } else {
+    setRayFromMouse(e); const bh=rc.intersectObjects(activeButtonMeshes(),false)[0];
+    pcHover=bh?bh.object.userData.btn:null; canvas.style.cursor=pcHover?'pointer':'crosshair';
+  }
+});
+canvas.addEventListener('pointerup',e=>{ if(renderer.xr.isPresenting) return; if(pDown&&!pDown.moved){ initAudio(); setRayFromMouse(e); handlePick(rc,null); } pDown=null; });
+canvas.style.cursor='crosshair';
+
+let snapCool=0, vigAmt=0;
+function handleInput(dt){
+  const xr=renderer.xr.isPresenting;
+  const canMove=(state==='menu'||state==='intro'||state==='play'||state==='result');
+  let mx=0, mz=0;
+  if(xr){
+    for(const src of renderer.xr.getSession().inputSources){
+      const gp=src.gamepad; if(!gp) continue;
+      const x=(gp.axes.length>=4?gp.axes[2]:gp.axes[0])||0, y=(gp.axes.length>=4?gp.axes[3]:gp.axes[1])||0;
+      if(src.handedness==='left'){ if(Math.abs(x)>0.15) mx=x; if(Math.abs(y)>0.15) mz=y; }
+      else if(src.handedness==='right' && canMove && snapCool<=0 && Math.abs(x)>0.7){ snapTurn(x>0?-Math.PI/6:Math.PI/6); snapCool=0.35; }
+    }
+  } else {
+    if(keys.KeyW||keys.ArrowUp) mz-=1; if(keys.KeyS||keys.ArrowDown) mz+=1;
+    if(keys.KeyA||keys.ArrowLeft) mx-=1; if(keys.KeyD||keys.ArrowRight) mx+=1;
+  }
+  snapCool-=dt;
+  const moving=canMove&&(mx!==0||mz!==0);
+  if(moving){
+    const fwd=new THREE.Vector3(); camera.getWorldDirection(fwd); fwd.y=0; fwd.normalize();
+    const right=new THREE.Vector3(-fwd.z,0,fwd.x);
+    const d=fwd.multiplyScalar(-mz).addScaledVector(right,mx); if(d.lengthSq()>1) d.normalize();
+    moveHead(d.multiplyScalar(1.4*dt));
+  }
+  if(state!=='ending'&&state!=='replay'){ vigAmt+=(((moving&&xr)?0.9:0)-vigAmt)*Math.min(1,dt*8); setVignette(vigAmt,0.55); }
+  if(!xr) camera.rotation.set(pcPitch,pcYaw,0,'YXZ');
+}
+
+/* =====================================================================
+   メインループ・開始
+   ===================================================================== */
+const clock=new THREE.Clock();
+let frame=0, needAlign=0;
+renderer.setAnimationLoop(()=>{
+  const dt=Math.min(clock.getDelta(),0.1); frame++;
+  if(needAlign && renderer.xr.isPresenting && frame>needAlign){ toStart(); needAlign=0; }
+  updateTweens(dt);
+  handleInput(dt);
+  if(state==='play'){
+    timeLeft-=dt; const s=Math.ceil(timeLeft);
+    if(s!==lastSec){ lastSec=s; drawHud(); if(s<=10&&s>0) sfx.tick(); }
+    if(timeLeft<=0) endGame('timeup');
+  }
+  for(let i=wrongMarks.length-1;i>=0;i--){ const w=wrongMarks[i]; w.t+=dt; w.s.material.opacity=Math.max(0,1-w.t/1.2); if(w.t>1.2){ markers.remove(w.s); wrongMarks.splice(i,1); } }
+  black.visible=black.material.opacity>0.001; whiteOv.visible=whiteOv.material.opacity>0.001;
+  const hoverSet=new Set();
+  if(renderer.xr.isPresenting) updateVRPointers(hoverSet); else if(pcHover) hoverSet.add(pcHover);
+  for(const b of buttons) b.setHover(hoverSet.has(b));
+  renderer.render(scene,camera);
+});
+addEventListener('resize',()=>{ camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth,innerHeight); });
+
+// URLで直接シナリオを指定できます（例：index.html?s=kanden）
+const directSc=SCENARIOS.find(s=>s.id===URLP.get('s'));
+function begin(){ if(directSc) goIntro(directSc); else goMenu(); }
+function idleScene(){ if(SOLO&&directSc) goIntro(directSc); else goMenu(); state='idle'; }
+idleScene();
+if(SOLO&&directSc){ document.querySelector('.card h1').textContent=`KY体験VR：${directSc.title}`; document.title=`KY体験VR：${directSc.title}`; }
+
+const overlay=document.getElementById('overlay'), statusEl=document.getElementById('status'), vrBtn=document.getElementById('vrBtn');
+document.getElementById('fxOpt').addEventListener('change',e=>setEffect(e.target.checked));
+if('xr' in navigator){
+  navigator.xr.isSessionSupported('immersive-vr').then(ok=>{
+    if(ok){ vrBtn.disabled=false; statusEl.textContent=''; }
+    else statusEl.textContent='この端末・ブラウザはVR非対応です。「PCで開始」をお使いください。';
+  }).catch(()=>{ statusEl.textContent='VR対応を確認できませんでした。'; });
+} else {
+  statusEl.textContent = window.isSecureContext ? 'このブラウザはWebXR非対応です（PC体験は可能）。' : 'VRで使うにはHTTPSで公開したURLから開いてください（PC体験は可能）。';
+}
+vrBtn.addEventListener('click',async()=>{
+  initAudio();
+  try{
+    const session=await navigator.xr.requestSession('immersive-vr',{optionalFeatures:['local-floor','bounded-floor','hand-tracking']});
+    await renderer.xr.setSession(session);
+    session.addEventListener('end',()=>{
+      tweens.length=0; resetFX();
+      camera.position.set(0,1.6,0); camera.quaternion.identity(); rig.rotation.y=0;
+      idleScene(); overlay.style.display='flex';
+    });
+    overlay.style.display='none'; document.getElementById('pcHelp').style.display='none';
+    begin(); needAlign=frame+5;
+  }catch(e){ statusEl.textContent='VRを開始できませんでした：'+e.message; }
+});
+document.getElementById('pcBtn').addEventListener('click',()=>{
+  initAudio(); overlay.style.display='none'; document.getElementById('pcHelp').style.display='block'; begin();
+});
+</script>
+</body>
+</html>
